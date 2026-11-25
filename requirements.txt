@@ -1,0 +1,10 @@
+# Python 3.12 is used (see Dockerfile). Versions are pinned so builds never break.
+python-telegram-bot==22.5      # Telegram bot (async, inline keyboards, conversations)
+fastapi==0.115.12              # web dashboard + API
+uvicorn==0.34.3                # web server
+httpx==0.28.1                  # async HTTP client for Jupiter / GeckoTerminal / Meteora
+aiosqlite==0.21.0              # async SQLite (shared settings database)
+pandas==2.3.3                  # data tables for candles
+numpy==2.2.6                   # maths (pinned to match numba below)
+pandas-ta==0.4.71b0            # RSI + Bollinger Bands
+numba==0.61.2                  # required by pandas-ta
