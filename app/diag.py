@@ -48,10 +48,18 @@ async def main() -> None:
     except SourceError as e:
         print("\n[Jupiter price] FAILED:", e)
     try:
-        cs = await data.candles(SAMPLE_TOKEN, "5m", 50, "system")
-        print(f"\n[Candle history] OK — {len(cs.df)} x 5m candles from {cs.source}")
+        cs = await data.jup_chart(SAMPLE_TOKEN, "5m", 50, "system")
+        last = cs.df.iloc[-1]
+        print(f"\n[Jupiter chart candles] OK — {len(cs.df)} x 5m candles, last close ${last['close']:.4f}"
+              " (exit alerts use these)")
     except SourceError as e:
-        print("\n[Candle history] FAILED:", e, "(GeckoTerminal may be rate limiting; it recovers by itself)")
+        print("\n[Jupiter chart candles] FAILED:", e)
+        print("  -> exit alerts automatically use GeckoTerminal candles instead.")
+    try:
+        cs = await data.candles(SAMPLE_TOKEN, "5m", 50, "system")
+        print(f"\n[Backup candles] OK — {len(cs.df)} x 5m candles from {cs.source}")
+    except SourceError as e:
+        print("\n[Backup candles] FAILED:", e, "(GeckoTerminal may be rate limiting; it recovers by itself)")
     await data.close()
 
 

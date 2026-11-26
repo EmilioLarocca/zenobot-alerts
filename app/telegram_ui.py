@@ -328,6 +328,9 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
+HOST_LABELS = {"jupchart": "jupiter charts (exit-alert candles)"}
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _, data, cfg = deps(context)
     if not allowed(update, cfg):
@@ -336,7 +339,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for host, st in data.status().items():
         icon = {True: "🟢", False: "🔴", None: "⚪"}[st["healthy"]]
         err = f" — last error: {fmt.esc(st['error'])}" if st["error"] else ""
-        lines.append(f"{icon} {host}{err}")
+        lines.append(f"{icon} {HOST_LABELS.get(host, host)}{err}")
     lines.append(f"\nGMGN API key (total fees only): {'yes ✅' if cfg.gmgn_api_key else 'no ⚠️ (fees filter off)'}")
     lines.append(f"Jupiter API key: {'yes' if cfg.jupiter_api_key else 'no (keyless, slower)'}")
     lines.append(f"Database on persistent volume: {'yes ✅' if cfg.volume_persistent else 'NO ⚠️'}")

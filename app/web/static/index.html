@@ -87,6 +87,7 @@
     <span class="pill" id="sync"><span class="dot"></span>connecting…</span>
     <span class="pill" id="h-gmgn"><span class="dot"></span>GMGN</span>
     <span class="pill" id="h-jupiter"><span class="dot"></span>Jupiter</span>
+    <span class="pill" id="h-jupchart"><span class="dot"></span>Jupiter charts</span>
     <span class="pill" id="h-gecko"><span class="dot"></span>GeckoTerminal</span>
     <span class="pill" id="h-meteora"><span class="dot"></span>Meteora</span>
     <span class="pill" id="h-metlex"><span class="dot"></span>Metlex</span>
@@ -216,7 +217,7 @@ document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
 /* ======================= render ======================= */
 function render() {
   // data-source health pills
-  for (const h of ["gmgn","jupiter","gecko","meteora","metlex"]) {
+  for (const h of ["gmgn","jupiter","jupchart","gecko","meteora","metlex"]) {
     const st = (S.health || {})[h] || {}, el = $("#h-" + h), dot = el.querySelector(".dot");
     dot.className = "dot " + (st.healthy === true ? "ok" : st.healthy === false ? "bad" : "");
     el.title = st.error ? "Last error: " + st.error : "OK";

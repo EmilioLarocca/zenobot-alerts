@@ -76,6 +76,8 @@ class Market:
         self.gmgn_down = False
         self.metlex_up = False
         self.metlex_lists_down = False
+        self.jupchart_up = False
+        self.chart_params: list[dict] = []
         self.candles: list[list[float]] = []
         self.jup_fail = False
         self.calls: list[str] = []
@@ -122,6 +124,14 @@ class Market:
                         "close": str(r[4]), "volume": "1", "amount": "50"} for r in reversed(self.candles)]
                 return httpx.Response(200, json={"code": 0, "data": {"list": lst}})
             return httpx.Response(200, json={"code": 404, "error": "NOT_FOUND", "message": "nope"})
+        if u.host == "api.jup.ag" and u.path.startswith("/_datapi/v2/charts/"):
+            self.chart_params.append(dict(u.params))
+            if not self.jupchart_up:
+                return httpx.Response(403)
+            # Jupiter answers oldest -> newest, times in seconds
+            return httpx.Response(200, json={"candles": [
+                {"time": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5]}
+                for r in reversed(self.candles)]})
         if u.host == "api.jup.ag":
             if self.jup_fail:
                 return httpx.Response(500)
@@ -633,4 +643,59 @@ def test_scanner_lists_routes_and_fallback(tmp_path):
         cands, info = await scanner.collect_candidates(ctx, s)
         assert "api.jup.ag/tokens/v2/toptrending/5m" in m.calls      # Metlex down -> Jupiter directly
         assert info["sources"]["jupiter toptrending"] == 4 and len(cands) == 4
+    run(go())
+
+
+def test_exit_candles_from_jupiter_chart_with_gecko_backup(tmp_path):
+    m = Market()
+    m.candles = rising_candles(n=200)
+    m.jupchart_up = True
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m)
+        cs = await ctx.data.candles(MINT_A, "15m", 150, "exit", jupiter_chart=True)
+        assert cs.source == "jupiter" and len(cs.df) == 200
+        assert cs.df["ts"].is_monotonic_increasing
+        p = m.chart_params[-1]
+        assert p["interval"] == "15_MINUTE" and p["quote"] == "usd" and p["type"] == "price"
+        assert abs(int(p["to"]) / 1000 - time.time()) < 5          # always up to "now"
+        n = len(m.chart_params)
+        await ctx.data.volume_1m(MINT_A, "token")                   # token alerts: unchanged (no Jupiter chart)
+        assert len(m.chart_params) == n
+        m.jupchart_up = False                                       # Jupiter chart blocked -> GeckoTerminal
+        cs = await ctx.data.candles(MINT_A, "15m", 150, "exit", jupiter_chart=True)
+        assert cs.source == "gecko"
+        assert ctx.data.status()["jupchart"]["healthy"] is False
+    run(go())
+
+
+def test_exit_alert_fires_on_jupiter_candles(tmp_path):
+    m = Market()
+    m.candles = rising_candles()
+    m.jupchart_up = True
+    m.price[MINT_A] = m.candles[0][4] * 1.01
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m, gmgn=True)
+        aid = await svc.create_exit_alert(ctx.db, ctx.data, {"ca": MINT_A, "timeframe": "5m", "rsi_min": 60,
+                                                             "bb_enabled": True, "bb_above_middle": "0"})
+        await exit_alerts.run_cycle(ctx)                       # first check -> alert right away
+        a = await ctx.db.get("exit_alerts", aid)
+        assert a["last_error"] is None, a["last_error"]
+        assert len(ctx.notifier.sent) == 1
+        text, photo = ctx.notifier.sent[0]
+        assert "Exit Position Alert" in text and "RSI(14)" in text and "Reminder every 5 min" in text
+        assert photo and photo.endswith(".png")
+        assert not any("gmgn" in c for c in m.calls)                      # GMGN not used for candles
+        ohlcv_calls = sum("/ohlcv/" in c for c in m.calls)
+        await exit_alerts.run_cycle(ctx)                                 # live tick: no new download
+        assert sum("/ohlcv/" in c for c in m.calls) == ohlcv_calls
+        assert len(ctx.notifier.sent) == 1                     # within 5 min -> silent
+        await ctx.db.update("exit_alerts", aid, {"last_triggered": time.time() - 301})
+        await exit_alerts.run_cycle(ctx)                       # 5 min later, still true -> reminder
+        assert len(ctx.notifier.sent) == 2 and "reminder" in ctx.notifier.sent[1][0]
+        await ctx.db.update("exit_alerts", aid, {"expires_at": time.time() - 1})
+        await exit_alerts.run_cycle(ctx)
+        assert (await ctx.db.get("exit_alerts", aid))["status"] == "expired"
+        assert "finished" in ctx.notifier.sent[-1][0]
     run(go())

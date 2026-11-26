@@ -38,6 +38,10 @@ GECKO_BASE = "https://api.geckoterminal.com/api/v2"
 METEORA_BASE = "https://dlmm.datapi.meteora.ag"
 GMGN_BASE = "https://openapi.gmgn.ai"
 METLEX_FEES_URL = "https://www.metlex.io/api/gmgn/token-info"
+# Jupiter's own chart data (what jup.ag draws on a token page). Internal endpoint, not in
+# Jupiter's public docs: it can change without notice, so GeckoTerminal stays as backup.
+JUP_CHART_URL = "https://api.jup.ag/_datapi/v2/charts/{mint}"
+JUP_CHART_TF = {"1m": "1_MINUTE", "5m": "5_MINUTE", "15m": "15_MINUTE", "1h": "1_HOUR", "4h": "4_HOUR"}
 # Metlex also relays Jupiter's token lists: this is the exact URL your previous bot used
 METLEX_JUP_BASE = "https://www.metlex.io/api/jupiter/api"
 
@@ -103,7 +107,7 @@ class TTLCache:
 class CandleSet:
     """OHLCV candles plus information about where they came from."""
     df: pd.DataFrame                 # columns: ts, open, high, low, close, volume (oldest -> newest)
-    source: str                      # "gecko" | "meteora"
+    source: str                      # "jupiter" | "gecko" | "meteora"
     pool: str
     fetched_at: float
     relative: bool = False           # True = prices are not USD and must be rescaled to the live price
@@ -209,7 +213,7 @@ class DataHub:
         gmgn_capacity = max(3, gmgn_rate)  # must fit the heaviest route (trending = 3 units)
         self.limiter = RateLimiter(
             {"jupiter": cfg.jupiter_rpm, "gecko": cfg.gecko_rpm, "meteora": cfg.meteora_rps * 60,
-             "metlex": 40},
+             "metlex": 40, "jupchart": 20},
             cfg.module_rpm,
             # GMGN uses a weighted bucket: each route costs 1–3 units (free plan: 5 units/s)
             extra_buckets={"gmgn": TokenBucket(gmgn_rate, capacity=gmgn_capacity)},
@@ -228,7 +232,7 @@ class DataHub:
         self.cache = TTLCache()
         self.health: dict[str, dict[str, Any]] = {
             s: {"ok_at": None, "err_at": None, "error": None}
-            for s in ("gmgn", "jupiter", "gecko", "meteora", "metlex")
+            for s in ("gmgn", "jupiter", "jupchart", "gecko", "meteora", "metlex")
         }
 
     @property
@@ -246,8 +250,8 @@ class DataHub:
         if not await self.limiter.acquire(host, module, timeout=wait):
             raise SourceError(f"{host}: rate budget busy, request skipped")
         headers = {"x-api-key": self.cfg.jupiter_api_key} if host == "jupiter" and self.cfg.jupiter_api_key else None
-        if host == "metlex":
-            headers = {"User-Agent": "Mozilla/5.0 (compatible; zenobot_alerts/1.2)"}
+        if host in ("metlex", "jupchart"):
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; zenobot_alerts/1.3)"}
         try:
             r = await self.client.get(url, params=params, headers=headers)
         except httpx.HTTPError as e:
@@ -624,12 +628,51 @@ class DataHub:
         self.cache.set(key, res, 3600 if res["gecko"] else 300)
         return res
 
-    async def candles(self, mint: str, tf: str, limit: int, module: str) -> CandleSet:
+    async def jup_chart(self, mint: str, tf: str, limit: int, module: str, quote: str = "usd") -> CandleSet:
         """
-        OHLCV candle history in USD for RSI/Bollinger. GeckoTerminal first, Meteora
-        DLMM as fallback (only 5m/1h/4h). Raises SourceError when nothing works.
+        Candles from Jupiter's chart data: all pools of the token combined, the same
+        candles as the chart on jup.ag. Prices in USD by default (quote="native" = SOL).
+        """
+        if tf not in JUP_CHART_TF:
+            raise SourceError(f"jupchart: timeframe {tf} not supported")
+        params = {"interval": JUP_CHART_TF[tf], "to": int(time.time() * 1000), "candles": int(limit),
+                  "type": "price", "quote": quote}
+        data = await self._get("jupchart", JUP_CHART_URL.format(mint=mint), params, module, wait=10)
+        rows = data.get("candles") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            self._bad("jupchart", "unexpected answer format")
+            raise SourceError("jupchart: unexpected answer format")
+        recs = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            v = [_f(r.get(k)) for k in ("time", "open", "high", "low", "close", "volume")]
+            if None in v[:5] or v[4] <= 0:
+                continue
+            recs.append(v[:5] + [v[5] or 0.0])
+        if not recs:
+            raise SourceError("jupchart: no candles for this token")
+        df = pd.DataFrame(recs, columns=["ts", "open", "high", "low", "close", "volume"])
+        if df["ts"].max() > 1e12:  # milliseconds -> seconds (today the API answers in seconds)
+            df["ts"] = df["ts"] / 1000
+        df["ts"] = df["ts"].astype(int)
+        df = df.sort_values("ts").drop_duplicates("ts", keep="last").reset_index(drop=True)
+        return CandleSet(df=df, source="jupiter", pool="", fetched_at=time.time())
+
+    async def candles(self, mint: str, tf: str, limit: int, module: str,
+                      jupiter_chart: bool = False) -> CandleSet:
+        """
+        OHLCV candle history in USD for RSI/Bollinger.
+        jupiter_chart=True (exit alerts): Jupiter's chart data first.
+        Then GeckoTerminal, then Meteora DLMM (only 5m/1h/4h). Raises SourceError when nothing works.
         """
         errors: list[str] = []
+        if jupiter_chart:
+            try:
+                return await self.jup_chart(mint, tf, limit, module)
+            except SourceError as e:
+                errors.append(str(e))
+                log.info("Jupiter chart failed for %s %s, using GeckoTerminal: %s", mint, tf, e)
         pools = await self.best_pool(mint, module)
         if not pools:
             raise SourceError("; ".join(errors + ["no liquidity pool found for this token"]))

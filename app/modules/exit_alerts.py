@@ -3,11 +3,12 @@ Module C — Exit Position Alert (RSI / Bollinger Bands on LIVE candles).
 
 Every 10 seconds, for each active exit alert:
   1. Get the live USD price (Jupiter, one batched request for all alerts).
-  2. Candles are built LOCALLY: the history is downloaded from GeckoTerminal
-     (fallback Meteora DLMM, 5m/1h/4h) when the alert starts and re-synced every
-     RESYNC_MINUTES; between syncs every 10-second live price updates the running
-     candle (open/high/low/close) and starts new candles on time. This keeps the
-     indicators real-time while using only ~3 GeckoTerminal calls/minute for 15 alerts.
+  2. Candles are built LOCALLY: the history (USD) is downloaded from Jupiter's chart
+     data — all pools combined, the same candles as the jup.ag chart — with
+     GeckoTerminal (then Meteora DLMM, 5m/1h/4h) as backup. It is re-synced every
+     RESYNC_MINUTES (2 min from Jupiter, 5 min when on the GeckoTerminal backup);
+     between syncs every 10-second live price updates the running candle
+     (open/high/low/close) and starts new candles on time.
   3. Compute RSI / Bollinger Bands with pandas-ta on those live candles.
   4. If the condition is met -> alert immediately. While it stays met, a
      reminder is sent every REMINDER_MINUTES (default 5). Auto-expires at the end.
@@ -34,7 +35,8 @@ MODULE = "exit"
 INTERVAL_S = 10           # how often every exit alert is re-checked
 IDLE_S = 10
 REMINDER_MINUTES = 5      # while the condition holds, remind at most this often
-RESYNC_MINUTES = 5        # re-download candle history from GeckoTerminal this often
+RESYNC_MINUTES = 2        # re-download candle history from Jupiter's chart this often
+RESYNC_BACKUP_MINUTES = 5 # ...and this often when on the GeckoTerminal/Meteora backup (lower limits)
 MAX_CANDLES = 1000        # keep at most this many candles in memory per alert
 
 
@@ -76,10 +78,11 @@ async def live_candles(ctx: Ctx, a: dict, live_price: float | None, now: float):
     key = (a["ca"], tf)
     store = _store(ctx)
     entry = store.get(key)
-    if entry is None or now - entry["synced"] >= RESYNC_MINUTES * 60:
+    every = RESYNC_MINUTES if entry is None or entry.get("source") == "jupiter" else RESYNC_BACKUP_MINUTES
+    if entry is None or now - entry["synced"] >= every * 60:
         limit = min(MAX_CANDLES, max(candles_needed(a) * 4, 150))
         try:
-            cs = await ctx.data.candles(a["ca"], tf, limit, MODULE)
+            cs = await ctx.data.candles(a["ca"], tf, limit, MODULE, jupiter_chart=True)
             df = cs.df
             if cs.relative and live_price:
                 df = rescale_to_price(df, live_price)
@@ -88,12 +91,12 @@ async def live_candles(ctx: Ctx, a: dict, live_price: float | None, now: float):
                 newer = entry["df"][entry["df"]["ts"] > int(df["ts"].iloc[-1])]
                 if len(newer):
                     df = pd.concat([df, newer], ignore_index=True)
-            entry = {"df": df, "synced": now, "notes": cs.notes}
+            entry = {"df": df, "synced": now, "notes": cs.notes, "source": cs.source}
             store[key] = entry
         except SourceError as e:
             if entry is None:
                 raise SourceError(f"waiting for candle history ({e})")
-            entry["synced"] = now - RESYNC_MINUTES * 60 + 60  # retry the sync in a minute
+            entry["synced"] = now - every * 60 + 60  # retry the sync in a minute
             log.info("resync failed for %s %s, continuing on live candles: %s", a["ca"], tf, e)
     df = entry["df"]
     if df.empty:

@@ -6,7 +6,7 @@ A 24/7 alert bot for Solana tokens and Meteora DLMM positions. You control it fr
 |---|---|
 | 📡 **A: Global Volume Scanner** | Every 10 seconds it checks Jupiter's top-trending list (exactly like your previous bot) plus the top-traded list for your timeframe, with a built-in check that no token above your threshold is missed. Alerts when volume (5m / 1h / 24h), market cap range and total fees (SOL, checked for each token) match your filters. Has a cooldown per token and a blacklist. |
 | 🎯 **B: Token Alerts** | Watches specific tokens for a Volume, Price (USD or SOL) or Market-cap threshold. Sends **"Special Alert Hit!"** when it is reached. |
-| 🚪 **C: Exit Alerts** | Watches RSI and/or Bollinger Bands on a **live** (still-open) candle every 10 seconds: 1m / 5m / 15m / 1h / 4h. The history comes from GeckoTerminal and the live candle is built from Jupiter prices. Alerts instantly, then reminds you every 5 minutes while the condition holds. Turns itself off after the duration you choose. |
+| 🚪 **C: Exit Alerts** | Watches RSI and/or Bollinger Bands on a **live** (still-open) candle every 10 seconds: 1m / 5m / 15m / 1h / 4h. The candle history comes from Jupiter's chart data in USD (the same candles as the chart on jup.ag, all pools combined), with GeckoTerminal as backup. The live candle is built from Jupiter prices. Alerts instantly, then reminds you every 5 minutes while the condition holds. Turns itself off after the duration you choose. |
 
 Every time you switch something **ON or OFF**, from Telegram or the dashboard, the bot sends you a Telegram message confirming it. That covers the scanner, a module, or a single alert.
 
@@ -128,7 +128,7 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 | `zenobot logs` | live logs (Ctrl+C to exit) |
 | `zenobot edit` | change token, chat id or password (save with Ctrl+O, Enter, Ctrl+X) |
 | `zenobot password` | show the dashboard password |
-| `zenobot test` | check the data sources (Jupiter, GeckoTerminal, Metlex, GMGN) |
+| `zenobot test` | check the data sources (Jupiter, Jupiter charts, GeckoTerminal, Metlex, GMGN) |
 | `zenobot scan` | run one scan without sending alerts and explain why tokens pass or are skipped |
 | `zenobot ip` | show the server's IP (for the GMGN whitelist) |
 | `zenobot status` | check it's running |
@@ -142,14 +142,14 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 - Tap a module to see its status. **Configure** opens its settings.
 - Some buttons ask you to type a value, for example *"Send the minimum volume…"*. You can use shortcuts: `50k`, `1.5m`, `12h`, `3d`. Send `/cancel` to stop.
 - **New alerts:** tap ➕ and send the contract address. Adjust the settings on the card, then tap **▶️ Activate**.
-- `/status` shows whether Jupiter, GeckoTerminal and Meteora are responding.
+- `/status` shows whether Jupiter, Jupiter charts, GeckoTerminal, Meteora and Metlex are responding.
 
 **Web dashboard:** the same settings arranged in tabs. It refreshes every 3 seconds. The pills at the top show data-source health.
 
 ### How alerts behave
 - **Scanner:** a token alerts at most once per *cooldown* period. Blacklisted tokens, SOL, USDC and USDT are always ignored. At most 8 alerts are sent per scan, so a market-wide pump can't flood you.
 - **Token alerts fire once per crossing.** After firing, an alert "re-arms" once the condition is no longer true.
-- **Exit alerts are real-time.** They're checked every 10 seconds on the live candle, and alert as soon as the condition is met. The candle history is downloaded from GeckoTerminal when the alert starts and refreshed every 5 minutes. Between refreshes, each 10-second Jupiter price updates the running candle and starts new candles on time. While it stays met, you get a **reminder every 5 minutes** (`REMINDER_MINUTES` in `app/modules/exit_alerts.py`). There are no extra confirmation filters. The only limit is mathematical: a brand-new token needs at least as many candles as the indicator length (for example 15 candles for RSI 14).
+- **Exit alerts are real-time.** They're checked every 10 seconds on the live candle, and alert as soon as the condition is met. The candle history is downloaded from Jupiter's chart data when the alert starts and refreshed every 2 minutes (every 5 minutes if it had to use the GeckoTerminal backup). Between refreshes, each 10-second Jupiter price updates the running candle and starts new candles on time. While it stays met, you get a **reminder every 5 minutes** (`REMINDER_MINUTES` in `app/modules/exit_alerts.py`). There are no extra confirmation filters. The only limit is mathematical: a brand-new token needs at least as many candles as the indicator length (for example 15 candles for RSI 14).
 - **RSI + BB together:** "ALL must hit" (default) needs both indicators. "ANY can hit" needs only one. If both indicators are OFF, the alert won't switch on and you get a warning.
 - **Bollinger option:** fill **either** "Min above Middle Band %" **or** "Min above Upper Band %". `0` means touching or above the band; `2` means at least 2% above it.
 - **Exit alert durations:** when the time runs out, you get a "monitoring ended" message. Changing the duration of a running alert restarts the countdown from now.
@@ -164,7 +164,7 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 | 5m/1h/24h volume, price change, market cap | Jupiter Tokens API V2 | The same source for every token, so all alerts are comparable. |
 | **Total fees** (SOL) | **Metlex** `total_fee`, the same as your previous bot, with **GMGN** as backup | Looked up for each token that passed the other filters, up to 20 per scan. Cached for 3 minutes. |
 | Live price, 24h change | Jupiter Price API V3 | One batched request every 10 seconds for all exit alerts. Falls back to GeckoTerminal. |
-| Candle history for RSI/BB | GeckoTerminal, then Meteora DLMM | Refreshed every 5 minutes per alert, so 15 exit alerts use about 3 GeckoTerminal calls/min. The live candle is built from Jupiter prices. |
+| Candle history for RSI/BB | **Jupiter chart data** (USD, all pools combined, same as jup.ag), then GeckoTerminal, then Meteora DLMM | Refreshed every 2 minutes per alert (15 exit alerts ≈ 7 calls/min). The Jupiter chart address is internal to jup.ag, not part of Jupiter's public API, so it can change without notice: if it fails, the bot switches that alert to GeckoTerminal automatically. Its health shows as "Jupiter charts" on the dashboard and in `/status`. The live candle is built from Jupiter prices. |
 
 - **Rate limiting:** each API has its own token bucket, and each alert module has a budget of 15 calls/min to Jupiter and GeckoTerminal. GMGN is only called for fee backups (`GMGN_RPS`, default 2/s). After an HTTP 429 the bot pauses that API automatically.
 - **Why no GeckoTerminal API key?** It isn't needed: building the live candle from Jupiter prices keeps GeckoTerminal usage low.
