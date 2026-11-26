@@ -4,7 +4,7 @@ A 24/7 alert bot for Solana tokens and Meteora DLMM positions. You control it fr
 
 | Module | What it does |
 |---|---|
-| 📡 **A: Global Volume Scanner** | Scans trending Solana tokens every minute using GMGN. Alerts when volume (5m / 1h / 24h), market cap range and GMGN total fees match your filters. Has a cooldown per token and a blacklist. |
+| 📡 **A: Global Volume Scanner** | Scans trending Solana tokens every minute using GMGN. Alerts when volume (5m / 1h / 24h), market cap range and GMGN total fees (in SOL) match your filters. Has a cooldown per token and a blacklist. |
 | 🎯 **B: Token Alerts** | Watches specific tokens for a Volume, Price (USD or SOL) or Market-cap threshold. Sends **"Special Alert Hit!"** when it is reached. |
 | 🚪 **C: Exit Alerts** | Watches RSI and/or Bollinger Bands on a **live** (still-open) candle every 10 seconds: 1m / 5m / 15m / 1h / 4h. Alerts instantly, then reminds you every 5 minutes while the condition holds. Turns itself off after the duration you choose. |
 
@@ -127,6 +127,7 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 | `zenobot edit` | change token, chat id or password (save with Ctrl+O, Enter, Ctrl+X) |
 | `zenobot password` | show the dashboard password |
 | `zenobot test` | check the GMGN key and data sources |
+| `zenobot fees` | show GMGN total fees (SOL) for 5 trending tokens |
 | `zenobot ip` | show the server's IP (for the GMGN whitelist) |
 | `zenobot status` | check it's running |
 | `zenobot restart` | restart the bot |
@@ -165,7 +166,7 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 
 - **Rate limiting:** each API has its own token bucket. GMGN's is weighted the way GMGN counts it: a candle request costs 2 units and a trending request 3 (`GMGN_RPS`, default 2 units/s, safe for the free plan). After an HTTP 429 the bot pauses that API automatically.
 - **Why not a GeckoTerminal API key?** CoinGecko's free key allows only 10,000 calls a month, and the $35 plan 100,000. Fifteen real-time exit alerts need far more than that, so GMGN replaces GeckoTerminal for candles.
-- **Total fees** come from GMGN, the same figure as on gmgn.ai. Run `zenobot test` to see the fee fields your key returns.
+- **Total fees** come from GMGN's trending list, field `gas_fee`. It holds the token's **lifetime total fees in SOL**, the "Total Fees" number on gmgn.ai; this was checked live with `zenobot fees`. Set the scanner minimum **in SOL**. Alerts show SOL plus the approximate dollar value.
 - **1m volume** was removed from the scanner, which now offers only 5m / 1h / 24h.
 
 

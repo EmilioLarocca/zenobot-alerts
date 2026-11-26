@@ -94,8 +94,13 @@ def token_title(symbol: str | None, name: str | None) -> str:
 
 # ----------------------------------------------------------- alert bodies
 def scanner_alert(tok: dict, tf: str, vol: float | None, chg: float | None) -> str:
-    src = "GMGN" if tok.get("source") == "gmgn" else "Jupiter"
-    fees_line = f"Total fees: {usd(tok.get('fees'))} ({src})" if tok.get("fees") is not None else "Total fees: n/a"
+    if tok.get("fees_sol") is not None:
+        approx = f" (~{usd(tok['fees'])})" if tok.get("fees") is not None else ""
+        fees_line = f"Total fees: <b>{number(tok['fees_sol'])} SOL</b>{approx}"
+    elif tok.get("fees") is not None:
+        fees_line = f"Total fees: {usd(tok['fees'])} (Jupiter)"
+    else:
+        fees_line = "Total fees: n/a"
     return (
         "📡 <b>Volume Scanner Hit</b>\n"
         f"{token_title(tok.get('symbol'), tok.get('name'))}\n\n"

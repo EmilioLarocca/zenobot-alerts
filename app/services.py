@@ -138,20 +138,21 @@ async def update_scanner(db: Database, changes: dict[str, Any]) -> dict[str, Any
             new[k] = parse_bool(v)
         elif k == "timeframe":
             new[k] = _choice(v, SCANNER_TFS, "Timeframe")
-        elif k in ("min_volume", "min_mcap", "max_mcap", "min_fees"):
+        elif k in ("min_volume", "min_mcap", "max_mcap", "min_fees_sol"):
             n = parse_number(v, k.replace("_", " "))
             if n < 0:
                 raise ValidationError("Values can't be negative")
             new[k] = n
         elif k == "cooldown_minutes":
             new[k] = parse_int(v, "Cooldown (minutes)", 0, 60 * 24 * 30)
-        elif k == "fees_source":
-            continue  # setting removed; ignore values sent by old dashboards
+        elif k in ("fees_source", "min_fees"):
+            continue  # old settings; ignore values sent by old dashboards
         else:
             raise ValidationError(f"Unknown scanner setting: {k}")
     if new["max_mcap"] and new["min_mcap"] > new["max_mcap"]:
         raise ValidationError("Min market cap is higher than max market cap")
     new.pop("fees_source", None)
+    new.pop("min_fees", None)
     await db.set_json("scanner", new)
     if new["enabled"] != cur["enabled"]:
         _announce(f"{'🟢' if new['enabled'] else '⚪'} <b>Volume Scanner</b> turned "

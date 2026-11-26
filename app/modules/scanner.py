@@ -4,7 +4,7 @@ Module A — Global Volume Scanner (timeframes: 5m, 1h, 24h).
 Every minute:
   1. Get trending Solana tokens for the chosen timeframe.
        * With a GMGN key (recommended): GMGN's trending list, filtered by GMGN
-         itself on volume, market cap and TOTAL FEES — the same numbers you see on gmgn.ai.
+         itself on volume, market cap and TOTAL FEES (in SOL, as on gmgn.ai).
        * Without a GMGN key: Jupiter's top-traded / top-trending / new lists
          (total fees are then not available and the fees filter is skipped).
   2. Drop SOL/USDC/USDT, blacklisted tokens and tokens still in cooldown.
@@ -35,7 +35,7 @@ async def gmgn_candidates(ctx: Ctx, s: dict) -> dict[str, dict]:
         min_volume=s["min_volume"],
         min_marketcap=s["min_mcap"],
         max_marketcap=s["max_mcap"],
-        min_total_fee=s["min_fees"],
+        min_gas_fee=s["min_fees_sol"],   # GMGN's "gas_fee" = lifetime total fees in SOL
     )
     return {t["mint"]: t for t in toks if t.get("mint")}
 
@@ -81,6 +81,13 @@ async def run_cycle(ctx: Ctx) -> float:
     last = await ctx.db.scanner_all_last_alerted()
     cooldown_s = float(s["cooldown_minutes"]) * 60
 
+    sol_usd = None
+    if fees_known:
+        try:
+            sol_usd = await ctx.data.sol_usd(MODULE)
+        except SourceError:
+            pass
+
     passed: list[tuple[dict, float, float | None]] = []
     for mint, t in cands.items():
         if mint in BASE_TOKENS or mint in blacklist:
@@ -95,10 +102,11 @@ async def run_cycle(ctx: Ctx) -> float:
         vol = (t.get("volume") or {}).get(tf)
         if vol is None or vol < s["min_volume"]:
             continue
-        if s["min_fees"] and fees_known:
-            # GMGN already filtered on total fees; if it also sent the number, double-check it
-            if t.get("fees") is not None and t["fees"] < s["min_fees"]:
+        if s["min_fees_sol"] and fees_known:
+            if t.get("fees_sol") is None or t["fees_sol"] < s["min_fees_sol"]:
                 continue
+        if t.get("fees_sol") is not None and sol_usd:
+            t["fees"] = t["fees_sol"] * sol_usd
         passed.append((t, vol, (t.get("change") or {}).get(tf)))
 
     passed.sort(key=lambda x: x[1], reverse=True)  # biggest volume first

@@ -177,12 +177,9 @@ def normalize_gmgn_rank(item: dict, interval: str) -> dict:
     vol[interval] = _f(item.get("volume"))
     if _f(item.get("price_change_percent")) is not None:
         chg[interval] = _f(item.get("price_change_percent"))
-    # GMGN's documented filter is "total_fee"; read it under the names it may use in responses
-    fees = None
-    for k in ("total_fee", "total_fees", "totalFee", "fee_total"):
-        if _f(item.get(k)) is not None:
-            fees = _f(item.get(k))
-            break
+    # GMGN's "gas_fee" on the trending list is the token's lifetime total fees in SOL
+    # (the "Total Fees" figure on gmgn.ai) — verified live on 2026-11-26.
+    fees_sol = _f(item.get("gas_fee"))
     return {
         "mint": item.get("address"),
         "symbol": item.get("symbol") or "?",
@@ -192,7 +189,8 @@ def normalize_gmgn_rank(item: dict, interval: str) -> dict:
         "mcap": _f(item.get("market_cap")),
         "fdv": None,
         "liquidity": _f(item.get("liquidity")),
-        "fees": fees,
+        "fees": None,            # USD, filled in by the scanner (fees_sol x SOL price)
+        "fees_sol": fees_sol,
         "volume": vol,
         "change": chg,
         "organic_score": None,

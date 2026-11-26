@@ -27,7 +27,7 @@ DEFAULT_SCANNER: dict[str, Any] = {
     "min_volume": 50_000,      # USD volume in the selected timeframe
     "min_mcap": 100_000,       # USD, 0 = no minimum
     "max_mcap": 50_000_000,    # USD, 0 = no maximum
-    "min_fees": 0,             # USD total fees paid by traders (GMGN), 0 = don't filter
+    "min_fees_sol": 0,         # GMGN "Total Fees" in SOL (lifetime), 0 = don't filter
     "cooldown_minutes": 60,    # don't alert the same token again for this long
 }
 
@@ -178,6 +178,7 @@ class Database:
         stored = await self.get_json("scanner", {}) or {}
         merged = {**DEFAULT_SCANNER, **stored}
         merged.pop("fees_source", None)        # removed setting (older versions)
+        merged.pop("min_fees", None)           # replaced by min_fees_sol (GMGN reports SOL)
         if merged["timeframe"] not in ("5m", "1h", "24h"):
             merged["timeframe"] = "5m"         # 1m was removed
         return merged

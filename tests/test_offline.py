@@ -94,8 +94,8 @@ class Market:
             if u.path == "/v1/market/rank":
                 rank = [{"address": m, "symbol": m[:3].upper(), "name": f"Token {m[:3]}", "logo": "https://img/x.png",
                          "price": self.price[m], "market_cap": self.mcap[m], "volume": self.vol5m[m],
-                         "price_change_percent": 4.2, "total_fee": fee}
-                        for m, fee in ((MINT_A, 9000.0), (MINT_B, 100.0), (MINT_C, 50000.0))]
+                         "price_change_percent": 4.2, "gas_fee": fee}
+                        for m, fee in ((MINT_A, 62.5), (MINT_B, 2.2), (MINT_C, 115.3))]
                 # real GMGN answers are double-wrapped (seen live on 2026-11-26)
                 return httpx.Response(200, json={"code": 0, "data": {"code": 0, "data": {"rank": rank}}})
             if u.path == "/v1/market/token_kline":
@@ -262,14 +262,14 @@ def test_scanner_gmgn_with_total_fees(tmp_path):
     async def go():
         ctx = await make_ctx(tmp_path, m, gmgn=True)
         await svc.update_scanner(ctx.db, {"enabled": True, "timeframe": "5m", "min_volume": "50k",
-                                          "min_mcap": "1m", "max_mcap": "100m", "min_fees": "5k"})
+                                          "min_mcap": "1m", "max_mcap": "100m", "min_fees_sol": "20"})
         await scanner.run_cycle(ctx)
         sent = [t for t, _ in ctx.notifier.sent]
-        # A passes (fees 9000); B fails fees (100); C fails max market cap
-        assert len(sent) == 1 and "$7GC" in sent[0] and "Total fees: $9.00K (GMGN)" in sent[0]
+        # A passes (62.5 SOL fees); B fails fees (2.2 SOL); C fails max market cap
+        assert len(sent) == 1 and "$7GC" in sent[0], sent
+        assert "Total fees: <b>62.5 SOL</b> (~$9.38K)" in sent[0]   # 62.5 x $150 SOL
         p = m.gmgn_params[0]
-        assert p["interval"] == "5m" and p["min_total_fee"] == "5000.0" and p["max_marketcap"] == "100000000.0"
-        assert not any("api.jup.ag" in c for c in m.calls)  # GMGN only
+        assert p["interval"] == "5m" and p["min_gas_fee"] == "20.0" and p["max_marketcap"] == "100000000.0"
     run(go())
 
 
