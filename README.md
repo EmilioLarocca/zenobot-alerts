@@ -158,12 +158,12 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 | Need | Source | Notes |
 |---|---|---|
 | Scanner list (5m/1h/24h volume, market cap, **total fees**) | **GMGN OpenAPI** | Needs `GMGN_API_KEY`. Volume, market-cap and fee filters are applied by GMGN itself. |
-| Candles for RSI/BB (real-time) | **GMGN OpenAPI** | All timeframes 1m–4h. The free GMGN plan allows about 5 units/s, so **10–15+ exit alerts** stay real-time. |
+| Candles for RSI/BB (real-time) | **GMGN OpenAPI** | All timeframes 1m–4h. The free GMGN plan allows about 5 units/s, so **10–15 exit alerts** stay real-time. |
 | Live price, 24h change | Jupiter Price API V3 | One batched request every 10 seconds for all exit alerts. |
 | Token info (market cap, 5m volume, logo) | Jupiter Tokens API V2 | Used for token alerts and alert messages. Also the scanner backup without a GMGN key. |
 | Backup candles | GeckoTerminal, then Meteora DLMM | Used only if GMGN fails or there's no key. GeckoTerminal's free limit is about 5–10 calls/min. |
 
-- **Rate limiting:** each API has its own token bucket. GMGN's is weighted the way GMGN counts it: a candle request costs 2 units and a trending request 3 (`GMGN_RPS`, default 4 units/s). After an HTTP 429 the bot pauses that API automatically.
+- **Rate limiting:** each API has its own token bucket. GMGN's is weighted the way GMGN counts it: a candle request costs 2 units and a trending request 3 (`GMGN_RPS`, default 2 units/s, safe for the free plan). After an HTTP 429 the bot pauses that API automatically.
 - **Why not a GeckoTerminal API key?** CoinGecko's free key allows only 10,000 calls a month, and the $35 plan 100,000. Fifteen real-time exit alerts need far more than that, so GMGN replaces GeckoTerminal for candles.
 - **Total fees** come from GMGN, the same figure as on gmgn.ai. Run `zenobot test` to see the fee fields your key returns.
 - **1m volume** was removed from the scanner, which now offers only 5m / 1h / 24h.
@@ -182,7 +182,7 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 | `zenobot update` says "not possible to fast-forward" | Run `cd /opt/zenobot_alerts && git fetch && git reset --hard origin/main`, then `zenobot update`. This keeps your settings. |
 | Installer says "Could not download the repository" | The repository is private or the address is wrong. Make it public, or see "Private repository" above. |
 | Exit alert shows ⚠️ "only N candles of history" | The token is too new for your RSI/BB lengths. Use a smaller timeframe or shorter lengths, or wait. |
-| Many "429 rate limited" in `/status` | Normal from time to time. For GMGN, lower `GMGN_RPS` to 3 with `zenobot edit`. |
+| Many "429 rate limited" in `/status` | Normal from time to time. For GMGN, wait 5 minutes; if it keeps happening, set `GMGN_RPS=1` with `zenobot edit`. |
 | `zenobot test` says `AUTH_IP_BLOCKED` | Add the server IP (`zenobot ip`) to your GMGN key's IP whitelist on gmgn.ai. |
 
 ---
@@ -255,7 +255,7 @@ To change any of these, edit the file on GitHub (pencil icon → Commit), then r
 - **Alert message wording:** `app/formatting.py`.
 
 ### Optional variables
-Add these with `zenobot edit`, one per line like `GMGN_RPS=3`: `GMGN_API_KEY`, `GMGN_RPS` (default 4), `JUPITER_API_KEY`, `GECKO_RPM` (default 8), `JUPITER_RPM` (24 without a key, 50 with one), `MODULE_RPM` (15), `METEORA_RPS` (5).
+Add these with `zenobot edit`, one per line like `GMGN_RPS=3`: `GMGN_API_KEY`, `GMGN_RPS` (default 2), `JUPITER_API_KEY`, `GECKO_RPM` (default 8), `JUPITER_RPM` (24 without a key, 50 with one), `MODULE_RPM` (15), `METEORA_RPS` (5).
 
 
 *Not financial advice. Alerts depend on third-party data that can be delayed or wrong. Always double-check before acting.*

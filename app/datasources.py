@@ -50,7 +50,7 @@ GECKO_TF = {"1m": ("minute", 1), "5m": ("minute", 5), "15m": ("minute", 15), "1h
 METEORA_TF = {"5m": "5m", "1h": "1h", "4h": "4h"}  # Meteora has no 1m / 15m candles
 OHLCV_TTL = {"1m": 30, "5m": 45, "15m": 60, "1h": 90, "4h": 120}  # GeckoTerminal cache seconds
 # GMGN candles are refreshed often; the live Jupiter price updates the running candle in between
-GMGN_KLINE_TTL = {"1m": 15, "5m": 20, "15m": 25, "1h": 30, "4h": 30}
+GMGN_KLINE_TTL = {"1m": 15, "5m": 30, "15m": 45, "1h": 60, "4h": 60}
 GMGN_ROUTE_WEIGHT = {"rank": 3, "kline": 2}  # rate-limit cost of each GMGN route
 
 
@@ -159,6 +159,16 @@ def normalize_gecko_token(attrs: dict) -> dict:
     }
 
 
+def unwrap_gmgn(d: Any) -> Any:
+    """GMGN sometimes nests its answer: {"code":0,"data":{"code":0,"data":{...}}}. Peel every layer."""
+    for _ in range(5):
+        if isinstance(d, dict) and "data" in d and ("code" in d or len(d) <= 3):
+            d = d["data"]
+        else:
+            break
+    return d
+
+
 def normalize_gmgn_rank(item: dict, interval: str) -> dict:
     """Turn a GMGN trending (rank) item into the bot's standard token dict."""
     vol = {"5m": None, "1h": None, "6h": None, "24h": None}
@@ -196,11 +206,12 @@ class DataHub:
                  gmgn_client: httpx.AsyncClient | None = None):
         self.cfg = cfg
         gmgn_rate = max(1, cfg.gmgn_rps)
+        gmgn_capacity = max(3, gmgn_rate)  # must fit the heaviest route (trending = 3 units)
         self.limiter = RateLimiter(
             {"jupiter": cfg.jupiter_rpm, "gecko": cfg.gecko_rpm, "meteora": cfg.meteora_rps * 60},
             cfg.module_rpm,
             # GMGN uses a weighted bucket: each route costs 1–3 units (free plan: 5 units/s)
-            extra_buckets={"gmgn": TokenBucket(gmgn_rate, capacity=gmgn_rate)},
+            extra_buckets={"gmgn": TokenBucket(gmgn_rate, capacity=gmgn_capacity)},
         )
         self.client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(15.0),
@@ -297,7 +308,7 @@ class DataHub:
             self._bad("gmgn", msg[:200])
             raise SourceError(f"gmgn: {msg}")
         self.health["gmgn"]["ok_at"] = time.time()
-        return body.get("data")
+        return unwrap_gmgn(body.get("data"))
 
     async def gmgn_rank(self, interval: str, module: str, **filters: Any) -> list[dict]:
         """GMGN trending tokens on Solana for 1m/5m/1h/6h/24h, with server-side filters."""

@@ -16,7 +16,7 @@ Optional (sensible defaults are used when missing):
     GMGN_API_KEY         your GMGN OpenAPI key (https://gmgn.ai/ai). Strongly recommended:
                          it powers the volume scanner (incl. total fees) and real-time
                          candles for exit alerts. A read-only key (trading disabled) is enough.
-    GMGN_RPS             GMGN rate-limit units per second (default 4; free plan allows 5)
+    GMGN_RPS             GMGN rate-limit units per second (default 2, safe for the free plan)
     JUPITER_API_KEY      free key from https://portal.jup.ag (doubles Jupiter speed)
     GECKO_RPM            GeckoTerminal calls per minute (default 8, keyless limit is ~5-10)
     JUPITER_RPM          Jupiter calls per minute (default 24 keyless / 50 with key)
@@ -119,5 +119,5 @@ def load_config(require_telegram: bool = True) -> Config:
         jupiter_rpm=_int("JUPITER_RPM", 50 if jup_key else 24),
         module_rpm=_int("MODULE_RPM", 15),
         meteora_rps=_int("METEORA_RPS", 5),
-        gmgn_rps=_int("GMGN_RPS", 4),
+        gmgn_rps=_int("GMGN_RPS", 2),
     )

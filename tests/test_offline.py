@@ -96,7 +96,8 @@ class Market:
                          "price": self.price[m], "market_cap": self.mcap[m], "volume": self.vol5m[m],
                          "price_change_percent": 4.2, "total_fee": fee}
                         for m, fee in ((MINT_A, 9000.0), (MINT_B, 100.0), (MINT_C, 50000.0))]
-                return httpx.Response(200, json={"code": 0, "data": {"rank": rank}})
+                # real GMGN answers are double-wrapped (seen live on 2026-11-26)
+                return httpx.Response(200, json={"code": 0, "data": {"code": 0, "data": {"rank": rank}}})
             if u.path == "/v1/market/token_kline":
                 lst = [{"time": r[0] * 1000, "open": str(r[1]), "high": str(r[2]), "low": str(r[3]),
                         "close": str(r[4]), "volume": "1", "amount": "50"} for r in reversed(self.candles)]

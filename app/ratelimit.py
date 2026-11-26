@@ -45,6 +45,7 @@ class TokenBucket:
         self.tokens = 0
 
     def wait_time(self, weight: float = 1.0) -> float:
+        weight = min(weight, self.capacity)  # a request can never need more than a full bucket
         self._refill()
         block = max(0.0, self.blocked_until - time.monotonic())
         need = 0.0 if self.tokens >= weight else (weight - self.tokens) / self.rate
@@ -52,6 +53,7 @@ class TokenBucket:
 
     async def acquire(self, timeout: float = 30.0, weight: float = 1.0) -> bool:
         """Take `weight` tokens (GMGN routes cost 1–3). False if the wait would exceed `timeout`."""
+        weight = min(weight, self.capacity)
         async with self._lock:
             wait = self.wait_time(weight)
             if wait > timeout:
