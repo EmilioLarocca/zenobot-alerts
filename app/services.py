@@ -17,7 +17,7 @@ from .db import Database
 log = logging.getLogger("zenobot.services")
 
 MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")  # Solana base58 address
-SCANNER_TFS = ("1m", "5m", "1h", "24h")
+SCANNER_TFS = ("5m", "1h", "24h")
 TOKEN_TFS = ("1m", "5m", "1h", "24h")
 EXIT_TFS = ("1m", "5m", "15m", "1h", "4h")
 MAX_DURATION_H = 24 * 90
@@ -25,6 +25,32 @@ MAX_DURATION_H = 24 * 90
 
 class ValidationError(ValueError):
     """A friendly error message to show the user."""
+
+
+# ------------------------------------------------- ON/OFF notifications
+# main.py plugs the Telegram sender in here. Every time something is switched
+# on or off (from Telegram OR the dashboard) a short message is sent to you.
+_notify: Any = None
+
+
+def set_notifier(send: Any) -> None:
+    global _notify
+    _notify = send
+
+
+def _announce(text: str) -> None:
+    """Send in the background so the button/dashboard never waits for Telegram."""
+    if _notify is None:
+        return
+    try:
+        asyncio.get_running_loop().create_task(_notify(text))
+    except RuntimeError:
+        pass
+
+
+def _name(a: dict) -> str:
+    import html
+    return html.escape(a.get("symbol") or (a["ca"][:4] + "…" + a["ca"][-4:]))
 
 
 # ================================================================ parsers
@@ -120,12 +146,16 @@ async def update_scanner(db: Database, changes: dict[str, Any]) -> dict[str, Any
         elif k == "cooldown_minutes":
             new[k] = parse_int(v, "Cooldown (minutes)", 0, 60 * 24 * 30)
         elif k == "fees_source":
-            new[k] = _choice(v, ("jupiter", "meteora"), "Fees source")
+            continue  # setting removed; ignore values sent by old dashboards
         else:
             raise ValidationError(f"Unknown scanner setting: {k}")
     if new["max_mcap"] and new["min_mcap"] > new["max_mcap"]:
         raise ValidationError("Min market cap is higher than max market cap")
+    new.pop("fees_source", None)
     await db.set_json("scanner", new)
+    if new["enabled"] != cur["enabled"]:
+        _announce(f"{'🟢' if new['enabled'] else '⚪'} <b>Volume Scanner</b> turned "
+                  f"{'ON' if new['enabled'] else 'OFF'}")
     return new
 
 
@@ -150,13 +180,20 @@ async def blacklist_remove(db: Database, text: str) -> list[str]:
     return merged
 
 
+MODULE_NAMES = {"token_alerts_enabled": "Token Alerts", "exit_alerts_enabled": "Exit Alerts"}
+
+
 async def update_modules(db: Database, changes: dict[str, Any]) -> dict[str, Any]:
     cur = await db.module_settings()
+    before = dict(cur)
     for k, v in changes.items():
         if k not in cur:
             raise ValidationError(f"Unknown module setting: {k}")
         cur[k] = parse_bool(v)
     await db.set_json("modules", cur)
+    for k, label in MODULE_NAMES.items():
+        if cur[k] != before[k]:
+            _announce(f"{'🟢' if cur[k] else '⚪'} <b>{label}</b> module turned {'ON' if cur[k] else 'OFF'}")
     return cur
 
 
@@ -195,7 +232,10 @@ async def create_token_alert(db: Database, data_hub: Any, data: dict[str, Any], 
         raise ValidationError("Set a threshold greater than 0")
     a.update(await fetch_meta(data_hub, a["ca"]))
     a.update(status=status, armed=1)
-    return await db.insert("token_alerts", a)
+    aid = await db.insert("token_alerts", a)
+    if status == "active":
+        _announce(f"🟢 Token alert #{aid} <b>${_name(a)}</b> turned ON")
+    return aid
 
 
 async def update_token_alert(db: Database, alert_id: int, changes: dict[str, Any],
@@ -221,6 +261,9 @@ async def set_token_alert_status(db: Database, alert_id: int, status: str) -> di
     if status == "active" and (cur["threshold"] or 0) <= 0:
         raise ValidationError("Set a threshold greater than 0 before activating")
     await db.update("token_alerts", alert_id, {"status": status, "armed": 1})
+    if status != cur["status"]:
+        _announce(f"{'🟢' if status == 'active' else '⏸'} Token alert #{alert_id} <b>${_name(cur)}</b> turned "
+                  f"{'ON' if status == 'active' else 'OFF (paused)'}")
     return await db.get("token_alerts", alert_id)
 
 
@@ -283,7 +326,10 @@ async def create_exit_alert(db: Database, data_hub: Any, data: dict[str, Any], s
         a["expires_at"] = time.time() + a["duration_hours"] * 3600
     a.update(await fetch_meta(data_hub, a["ca"]))
     a.update(status=status, armed=1, pending_count=0)
-    return await db.insert("exit_alerts", a)
+    aid = await db.insert("exit_alerts", a)
+    if status == "active":
+        _announce(f"🟢 Exit alert #{aid} <b>${_name(a)}</b> ({a['timeframe']}) turned ON")
+    return aid
 
 
 async def update_exit_alert(db: Database, alert_id: int, changes: dict[str, Any],
@@ -316,10 +362,17 @@ async def set_exit_alert_status(db: Database, alert_id: int, status: str) -> dic
         if cur["status"] in ("draft", "expired") or not cur.get("expires_at") or cur["expires_at"] <= time.time():
             fields["expires_at"] = time.time() + float(cur["duration_hours"]) * 3600
     await db.update("exit_alerts", alert_id, fields)
+    if status != cur["status"]:
+        _announce(f"{'🟢' if status == 'active' else '⏸'} Exit alert #{alert_id} <b>${_name(cur)}</b> "
+                  f"({cur['timeframe']}) turned {'ON' if status == 'active' else 'OFF (paused)'}")
     return await db.get("exit_alerts", alert_id)
 
 
 async def delete_alert(db: Database, table: str, alert_id: int) -> None:
     if table not in ("token_alerts", "exit_alerts"):
         raise ValidationError("Unknown alert type")
+    cur = await db.get(table, alert_id)
     await db.delete(table, alert_id)
+    if cur and cur["status"] in ("active", "paused"):
+        kind = "Token" if table == "token_alerts" else "Exit"
+        _announce(f"🗑 {kind} alert #{alert_id} <b>${_name(cur)}</b> cancelled (OFF)")

@@ -23,12 +23,11 @@ import aiosqlite
 # --------------------------------------------------------------------------
 DEFAULT_SCANNER: dict[str, Any] = {
     "enabled": False,          # Module A starts switched OFF
-    "timeframe": "5m",         # 1m | 5m | 1h | 24h
+    "timeframe": "5m",         # 5m | 1h | 24h
     "min_volume": 50_000,      # USD volume in the selected timeframe
     "min_mcap": 100_000,       # USD, 0 = no minimum
     "max_mcap": 50_000_000,    # USD, 0 = no maximum
-    "min_fees": 0,             # USD, 0 = don't filter on fees
-    "fees_source": "jupiter",  # "jupiter" (fees paid by traders) | "meteora" (DLMM lifetime pool fees)
+    "min_fees": 0,             # USD total fees paid by traders (GMGN), 0 = don't filter
     "cooldown_minutes": 60,    # don't alert the same token again for this long
 }
 
@@ -177,7 +176,11 @@ class Database:
     # Convenience getters that always return complete settings dicts
     async def scanner_settings(self) -> dict[str, Any]:
         stored = await self.get_json("scanner", {}) or {}
-        return {**DEFAULT_SCANNER, **stored}
+        merged = {**DEFAULT_SCANNER, **stored}
+        merged.pop("fees_source", None)        # removed setting (older versions)
+        if merged["timeframe"] not in ("5m", "1h", "24h"):
+            merged["timeframe"] = "5m"         # 1m was removed
+        return merged
 
     async def module_settings(self) -> dict[str, Any]:
         stored = await self.get_json("modules", {}) or {}

@@ -11,7 +11,7 @@ How it is organised:
 Callback data cheat-sheet (max 64 bytes each):
   menu                         main menu
   A / A:tog / A:cfg            scanner screen / on-off / configure
-  A:tf:<tf> / A:fs             scanner timeframe / fees source toggle
+  A:tf:<tf>                    scanner timeframe
   A:ask:<field>                ask for a number
   A:bl / A:bl:add|rm|set|clr   blacklist screen / actions
   B / B:mod / B:new            token alerts list / module on-off / new
@@ -90,8 +90,7 @@ async def render_main(db: Database, public_url: str | None = None) -> Screen:
 
 def scanner_summary(s: dict) -> str:
     max_mc = fmt.usd(s["max_mcap"], 0) if s["max_mcap"] else "no max"
-    fees = f"≥ {fmt.usd(s['min_fees'], 0)} ({'Jupiter' if s['fees_source'] == 'jupiter' else 'Meteora DLMM'})" \
-        if s["min_fees"] else "off"
+    fees = f"≥ {fmt.usd(s['min_fees'], 0)} (GMGN)" if s["min_fees"] else "off"
     return (
         f"Timeframe: <b>{s['timeframe']}</b>\n"
         f"Min volume: <b>{fmt.usd(s['min_volume'], 0)}</b>\n"
@@ -122,8 +121,7 @@ async def render_scanner_cfg(db: Database) -> Screen:
         [b(f"Volume ≥ {fmt.usd(s['min_volume'], 0)}", "A:ask:min_volume")],
         [b(f"Min MC {fmt.usd(s['min_mcap'], 0)}", "A:ask:min_mcap"),
          b(f"Max MC {fmt.usd(s['max_mcap'], 0) if s['max_mcap'] else '∞'}", "A:ask:max_mcap")],
-        [b(f"Min fees {fmt.usd(s['min_fees'], 0) if s['min_fees'] else 'off'}", "A:ask:min_fees"),
-         b(f"Fees: {'Jupiter' if s['fees_source'] == 'jupiter' else 'Meteora'} 🔁", "A:fs")],
+        [b(f"Min total fees {fmt.usd(s['min_fees'], 0) if s['min_fees'] else 'off'}", "A:ask:min_fees")],
         [b(f"Cooldown {int(s['cooldown_minutes'])} min", "A:ask:cooldown_minutes")],
         [b("⬅️ Back", "A")],
     ]
@@ -211,6 +209,8 @@ def exit_line(a: dict) -> str:
     if a["status"] == "active" and a.get("expires_at"):
         ends = f" · ends in {fmt.duration(a['expires_at'] - time.time())}"
     live = ""
+    if a.get("last_triggered"):
+        live += f" · last alert {fmt.duration(time.time() - a['last_triggered'])} ago"
     if a.get("last_rsi") is not None:
         live += f" · RSI {a['last_rsi']:.1f}"
     if a.get("last_bb_pct") is not None:
@@ -336,7 +336,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         icon = {True: "🟢", False: "🔴", None: "⚪"}[st["healthy"]]
         err = f" — last error: {fmt.esc(st['error'])}" if st["error"] else ""
         lines.append(f"{icon} {host}{err}")
-    lines.append(f"\nJupiter API key: {'yes' if cfg.jupiter_api_key else 'no (keyless, slower)'}")
+    lines.append(f"\nGMGN API key: {'yes ✅' if cfg.gmgn_api_key else 'no ⚠️ (scanner fees + fast candles off)'}")
+    lines.append(f"Jupiter API key: {'yes' if cfg.jupiter_api_key else 'no (keyless, slower)'}")
     lines.append(f"Database on persistent volume: {'yes ✅' if cfg.volume_persistent else 'NO ⚠️'}")
     await update.effective_chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)
 
@@ -390,10 +391,6 @@ async def route(p: list[str], db: Database, data: Any, context: ContextTypes.DEF
             return await render_scanner_cfg(db)
         if act == "tf":
             await svc.update_scanner(db, {"timeframe": p[2]})
-            return await render_scanner_cfg(db)
-        if act == "fs":
-            s = await db.scanner_settings()
-            await svc.update_scanner(db, {"fees_source": "meteora" if s["fees_source"] == "jupiter" else "jupiter"})
             return await render_scanner_cfg(db)
         if act == "bl":
             if len(p) == 3 and p[2] == "clr":
@@ -467,7 +464,7 @@ SCANNER_PROMPTS = {
     "min_volume": "Send the minimum <b>volume in USD</b> for the selected timeframe.\nExamples: <code>50000</code> · <code>50k</code> · <code>1.2m</code>",
     "min_mcap": "Send the <b>minimum market cap</b> in USD (0 = no minimum).\nExamples: <code>100k</code> · <code>1m</code>",
     "max_mcap": "Send the <b>maximum market cap</b> in USD (0 = no maximum).\nExamples: <code>10m</code> · <code>500k</code>",
-    "min_fees": "Send the <b>minimum total fees</b> in USD (0 = don't filter).",
+    "min_fees": "Send the <b>minimum total fees</b> in USD, as shown on GMGN (0 = don't filter).",
     "cooldown_minutes": "Send the <b>cooldown in minutes</b> (how long before the same token can alert again).\nExample: <code>60</code>",
 }
 EXIT_PROMPTS = {

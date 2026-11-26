@@ -44,22 +44,22 @@ class TokenBucket:
         self.blocked_until = max(self.blocked_until, time.monotonic() + seconds)
         self.tokens = 0
 
-    def wait_time(self) -> float:
+    def wait_time(self, weight: float = 1.0) -> float:
         self._refill()
         block = max(0.0, self.blocked_until - time.monotonic())
-        need = 0.0 if self.tokens >= 1 else (1 - self.tokens) / self.rate
+        need = 0.0 if self.tokens >= weight else (weight - self.tokens) / self.rate
         return max(block, need)
 
-    async def acquire(self, timeout: float = 30.0) -> bool:
-        """Take one token. Returns False if we'd have to wait longer than `timeout`."""
+    async def acquire(self, timeout: float = 30.0, weight: float = 1.0) -> bool:
+        """Take `weight` tokens (GMGN routes cost 1–3). False if the wait would exceed `timeout`."""
         async with self._lock:
-            wait = self.wait_time()
+            wait = self.wait_time(weight)
             if wait > timeout:
                 return False
             if wait > 0:
                 await asyncio.sleep(wait)
                 self._refill()
-            self.tokens -= 1
+            self.tokens -= weight
             return True
 
 
@@ -70,8 +70,10 @@ class RateLimiter:
     # so it is limited by its own host bucket only).
     BUDGETED_HOSTS = {"jupiter", "gecko"}
 
-    def __init__(self, host_rpm: dict[str, float], module_rpm: float):
+    def __init__(self, host_rpm: dict[str, float], module_rpm: float,
+                 extra_buckets: dict[str, "TokenBucket"] | None = None):
         self.hosts = {h: TokenBucket.per_minute(r) for h, r in host_rpm.items()}
+        self.hosts.update(extra_buckets or {})
         self.module_rpm = module_rpm
         self.modules: dict[str, TokenBucket] = {}
 
@@ -80,13 +82,13 @@ class RateLimiter:
             self.modules[name] = TokenBucket.per_minute(self.module_rpm, burst=max(3, self.module_rpm / 3))
         return self.modules[name]
 
-    async def acquire(self, host: str, module: str = "system", timeout: float = 30.0) -> bool:
+    async def acquire(self, host: str, module: str = "system", timeout: float = 30.0, weight: float = 1.0) -> bool:
         hb = self.hosts.get(host)
-        if hb and hb.wait_time() > timeout:
+        if hb and hb.wait_time(weight) > timeout:
             return False  # API is in the penalty box or far too busy: fail fast
         if module != "system" and host in self.BUDGETED_HOSTS and not await self._module(module).acquire(timeout):
             return False
-        return await hb.acquire(timeout) if hb else True
+        return await hb.acquire(timeout, weight) if hb else True
 
     def penalize(self, host: str, seconds: float) -> None:
         if host in self.hosts:

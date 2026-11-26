@@ -85,6 +85,7 @@
   <div class="brand"><div class="logo">⚡</div>zenobot_alerts</div>
   <div class="pills">
     <span class="pill" id="sync"><span class="dot"></span>connecting…</span>
+    <span class="pill" id="h-gmgn"><span class="dot"></span>GMGN</span>
     <span class="pill" id="h-jupiter"><span class="dot"></span>Jupiter</span>
     <span class="pill" id="h-gecko"><span class="dot"></span>GeckoTerminal</span>
     <span class="pill" id="h-meteora"><span class="dot"></span>Meteora</span>
@@ -105,7 +106,7 @@
     <div class="card">
       <div class="row">
         <div><h2>Global Volume Scanner</h2>
-          <p class="sub">Scans trending &amp; new Solana tokens every minute (Jupiter + GeckoTerminal).</p></div>
+          <p class="sub">Scans trending Solana tokens every minute (GMGN; Jupiter as backup).</p></div>
         <label class="sw"><span id="sc-state">OFF</span>
           <span class="switch"><input type="checkbox" id="sc-enabled"><span></span></span></label>
       </div>
@@ -116,12 +117,7 @@
           <label class="f">Min volume (USD, selected timeframe)<input name="min_volume" placeholder="e.g. 50k"></label>
           <label class="f">Min market cap (USD, 0 = none)<input name="min_mcap" placeholder="e.g. 100k"></label>
           <label class="f">Max market cap (USD, 0 = none)<input name="max_mcap" placeholder="e.g. 50m"></label>
-          <label class="f">Min total fees (USD, 0 = off)<input name="min_fees" placeholder="e.g. 5k"></label>
-          <label class="f">Fees source
-            <select name="fees_source">
-              <option value="jupiter">Jupiter (fees paid by traders)</option>
-              <option value="meteora">Meteora DLMM (lifetime pool fees)</option>
-            </select></label>
+          <label class="f">Min total fees (USD, GMGN, 0 = off)<input name="min_fees" placeholder="e.g. 5k"></label>
           <label class="f">Cooldown per token (minutes)<input name="cooldown_minutes" placeholder="60"></label>
         </div>
         <div class="row" style="margin-top:14px"><span class="msg" id="sc-msg"></span>
@@ -154,7 +150,7 @@
   <section id="tab-exit" hidden>
     <div class="card">
       <div class="row">
-        <div><h2>Exit position alerts (RSI / Bollinger)</h2><p class="sub">Computed on the live, still-open candle. Needs 2 consecutive confirmations to avoid false signals.</p></div>
+        <div><h2>Exit position alerts (RSI / Bollinger)</h2><p class="sub">Computed on the live, still-open candle every 10 seconds. Alerts instantly, then reminds you every 5 minutes while the condition holds.</p></div>
         <label class="sw"><span id="em-state">ON</span>
           <span class="switch"><input type="checkbox" id="em-enabled"><span></span></span></label>
       </div>
@@ -219,7 +215,7 @@ document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
 /* ======================= render ======================= */
 function render() {
   // data-source health pills
-  for (const h of ["jupiter","gecko","meteora"]) {
+  for (const h of ["gmgn","jupiter","gecko","meteora"]) {
     const st = (S.health || {})[h] || {}, el = $("#h-" + h), dot = el.querySelector(".dot");
     dot.className = "dot " + (st.healthy === true ? "ok" : st.healthy === false ? "bad" : "");
     el.title = st.error ? "Last error: " + st.error : "OK";
@@ -234,14 +230,14 @@ function render() {
 }
 
 /* ---------- Module A ---------- */
-const SC_TFS = ["1m","5m","1h","24h"]; let scTf = "5m";
+const SC_TFS = ["5m","1h","24h"]; let scTf = "5m";
 function renderScanner() {
   const s = S.scanner;
   $("#sc-enabled").checked = s.enabled; $("#sc-state").textContent = s.enabled ? "ON" : "OFF";
   if (!dirty.scanner) {
     scTf = s.timeframe;
     const f = $("#sc-form");
-    for (const k of ["min_volume","min_mcap","max_mcap","min_fees","cooldown_minutes","fees_source"]) f.elements[k].value = s[k];
+    for (const k of ["min_volume","min_mcap","max_mcap","min_fees","cooldown_minutes"]) f.elements[k].value = s[k];
   }
   $("#sc-tf").innerHTML = SC_TFS.map(t => `<button type="button" class="${t===scTf?"on":""}" data-tf="${t}">${t}</button>`).join("");
   $("#sc-tf").querySelectorAll("button").forEach(b => b.onclick = () => { scTf = b.dataset.tf; dirty.scanner = true; renderScanner(); });
@@ -250,7 +246,7 @@ function renderScanner() {
 $("#sc-form").addEventListener("input", () => dirty.scanner = true);
 $("#sc-form").onsubmit = async e => {
   e.preventDefault(); const f = e.target, body = {timeframe: scTf};
-  for (const k of ["min_volume","min_mcap","max_mcap","min_fees","cooldown_minutes","fees_source"]) body[k] = f.elements[k].value;
+  for (const k of ["min_volume","min_mcap","max_mcap","min_fees","cooldown_minutes"]) body[k] = f.elements[k].value;
   try { await api("PUT", "/api/scanner", body); dirty.scanner = false; flash($("#sc-msg"), "Saved ✓"); refresh(true); }
   catch (err) { flash($("#sc-msg"), err.message, false); }
 };
@@ -374,7 +370,7 @@ function renderExitAlerts() {
     const live = [a.last_rsi != null ? `RSI ${a.last_rsi.toFixed(1)}` : "", a.last_bb_pct != null ? `BB ${pct(a.last_bb_pct)}` : ""].filter(Boolean).join(" · ") || "—";
     const ends = a.status === "active" && a.expires_at ? `ends in ${dur(a.expires_at - Date.now()/1000)}` : (a.status === "expired" ? "finished" : "");
     return `<tr><td class="tok"><b>$${esc(a.symbol || shortCa(a.ca))}</b> <span class="muted">${esc(a.name||"")}</span><div class="ca">${esc(a.ca)}</div></td>
-      <td>${a.timeframe} · ${parts.join(a.combine === "all" ? " AND " : " OR ")}${a.armed ? "" : `<div class="hint">fired · re-arms when condition clears</div>`}</td>
+      <td>${a.timeframe} · ${parts.join(a.combine === "all" ? " AND " : " OR ")}${a.last_triggered ? `<div class="hint">last alert ${ago(a.last_triggered)}</div>` : ""}</td>
       <td class="num">${live}${a.last_price != null ? `<div class="hint">${price(a.last_price)}</div>` : ""}${a.last_error && a.status==="active" ? `<div class="err">${esc(a.last_error)}</div>` : ""}</td>
       <td><span class="badge b-${a.status}">${a.status}</span><div class="hint">${ends}</div></td>
       <td class="actions"><button class="btn ghost small" data-edit-e="${a.id}">Edit</button>

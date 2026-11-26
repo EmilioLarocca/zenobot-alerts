@@ -48,10 +48,11 @@ def run(coro):
     return asyncio.run(wrapper())
 
 
-def cfg(tmp: Path) -> Config:
+def cfg(tmp: Path, gmgn: bool = False) -> Config:
     return Config(telegram_token="1:x", chat_id=42, dashboard_password="pw", jupiter_api_key=None,
+                  gmgn_api_key="gk" if gmgn else None,
                   data_dir=tmp, volume_persistent=True, port=0, public_url="https://example.test",
-                  gecko_rpm=600, jupiter_rpm=600, module_rpm=600, meteora_rps=50)
+                  gecko_rpm=600, jupiter_rpm=600, module_rpm=600, meteora_rps=50, gmgn_rps=50)
 
 
 class FakeNotifier:
@@ -74,6 +75,7 @@ class Market:
         self.candles: list[list[float]] = []
         self.jup_fail = False
         self.calls: list[str] = []
+        self.gmgn_params: list[dict] = []
 
     def tok(self, m):
         return {"id": m, "name": f"Token {m[:3]}", "symbol": m[:3].upper(), "icon": f"https://img/{m}.png",
@@ -86,6 +88,20 @@ class Market:
     def handler(self, req: httpx.Request) -> httpx.Response:
         u = req.url
         self.calls.append(f"{u.host}{u.path}")
+        if u.host == "openapi.gmgn.ai":
+            assert req.headers.get("X-APIKEY") == "gk" and "timestamp" in u.params and "client_id" in u.params
+            self.gmgn_params.append(dict(u.params))
+            if u.path == "/v1/market/rank":
+                rank = [{"address": m, "symbol": m[:3].upper(), "name": f"Token {m[:3]}", "logo": "https://img/x.png",
+                         "price": self.price[m], "market_cap": self.mcap[m], "volume": self.vol5m[m],
+                         "price_change_percent": 4.2, "total_fee": fee}
+                        for m, fee in ((MINT_A, 9000.0), (MINT_B, 100.0), (MINT_C, 50000.0))]
+                return httpx.Response(200, json={"code": 0, "data": {"rank": rank}})
+            if u.path == "/v1/market/token_kline":
+                lst = [{"time": r[0] * 1000, "open": str(r[1]), "high": str(r[2]), "low": str(r[3]),
+                        "close": str(r[4]), "volume": "1", "amount": "50"} for r in reversed(self.candles)]
+                return httpx.Response(200, json={"code": 0, "data": {"list": lst}})
+            return httpx.Response(200, json={"code": 404, "error": "NOT_FOUND", "message": "nope"})
         if u.host == "api.jup.ag":
             if self.jup_fail:
                 return httpx.Response(500)
@@ -122,12 +138,15 @@ class Market:
         return httpx.Response(404)
 
 
-async def make_ctx(tmp: Path, market: Market) -> Ctx:
+async def make_ctx(tmp: Path, market: Market, gmgn: bool = False) -> Ctx:
     """Must be awaited inside the same event loop as the test (aiosqlite is loop-bound)."""
     db = await Database.open(tmp / "t.db")
     _OPEN_DBS.append(db)
-    data = DataHub(cfg(tmp), client=httpx.AsyncClient(transport=httpx.MockTransport(market.handler)))
-    return Ctx(cfg=cfg(tmp), db=db, data=data, notifier=FakeNotifier())
+    mock = httpx.MockTransport(market.handler)
+    c = cfg(tmp, gmgn)
+    data = DataHub(c, client=httpx.AsyncClient(transport=mock),
+                   gmgn_client=httpx.AsyncClient(transport=mock) if gmgn else None)
+    return Ctx(cfg=c, db=db, data=data, notifier=FakeNotifier())
 
 
 def rising_candles(n=200, tf=300, start=1.0, step=0.004):
@@ -213,32 +232,72 @@ def test_services_and_validation(tmp_path):
     run(go())
 
 
-def test_scanner_cycle(tmp_path):
+def test_scanner_cycle_jupiter_fallback(tmp_path):
     m = Market()
+
     async def go():
         ctx = await make_ctx(tmp_path, m)
         await svc.update_scanner(ctx.db, {"enabled": True, "timeframe": "5m", "min_volume": "50k",
                                           "min_mcap": "1m", "max_mcap": "100m", "cooldown_minutes": 30})
+        with pytest.raises(svc.ValidationError):
+            await svc.update_scanner(ctx.db, {"timeframe": "1m"})  # 1m removed
         await scanner.run_cycle(ctx)
         sent = [t for t, _ in ctx.notifier.sent]
-        assert len(sent) == 1 and "$7GC" in sent[0] and "$80.00K" in sent[0] and "DLMM lifetime fees" in sent[0]
-        # cooldown: no repeat
-        await scanner.run_cycle(ctx)
+        assert len(sent) == 1 and "$7GC" in sent[0] and "$80.00K" in sent[0]
+        await scanner.run_cycle(ctx)  # cooldown: no repeat
         assert len(ctx.notifier.sent) == 1
-        # blacklist
         await ctx.db.conn.execute("DELETE FROM scanner_seen")
         await ctx.db.conn.commit()
         await svc.set_blacklist(ctx.db, MINT_A)
         await scanner.run_cycle(ctx)
         assert len(ctx.notifier.sent) == 1
-        # min fees filter (Jupiter fees = 1234.5)
-        await svc.set_blacklist(ctx.db, "")
-        await svc.update_scanner(ctx.db, {"min_fees": 2000})
+    run(go())
+
+
+def test_scanner_gmgn_with_total_fees(tmp_path):
+    m = Market()
+    m.vol5m[MINT_B] = 70_000.0
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m, gmgn=True)
+        await svc.update_scanner(ctx.db, {"enabled": True, "timeframe": "5m", "min_volume": "50k",
+                                          "min_mcap": "1m", "max_mcap": "100m", "min_fees": "5k"})
         await scanner.run_cycle(ctx)
-        assert len(ctx.notifier.sent) == 1
-        await svc.update_scanner(ctx.db, {"fees_source": "meteora"})  # DLMM fees 5555.5 pass
-        await scanner.run_cycle(ctx)
-        assert len(ctx.notifier.sent) == 2
+        sent = [t for t, _ in ctx.notifier.sent]
+        # A passes (fees 9000); B fails fees (100); C fails max market cap
+        assert len(sent) == 1 and "$7GC" in sent[0] and "Total fees: $9.00K (GMGN)" in sent[0]
+        p = m.gmgn_params[0]
+        assert p["interval"] == "5m" and p["min_total_fee"] == "5000.0" and p["max_marketcap"] == "100000000.0"
+        assert not any("api.jup.ag" in c for c in m.calls)  # GMGN only
+    run(go())
+
+
+def test_toggle_notifications(tmp_path):
+    m = Market()
+    msgs: list[str] = []
+
+    async def fake_send(text, photo=None):
+        msgs.append(text)
+        return True
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m)
+        svc.set_notifier(fake_send)
+        try:
+            await svc.update_scanner(ctx.db, {"enabled": True})
+            await svc.update_scanner(ctx.db, {"min_volume": "60k"})          # not a toggle -> silent
+            await svc.update_modules(ctx.db, {"exit_alerts_enabled": False})
+            tid = await svc.create_token_alert(ctx.db, ctx.data, {"ca": MINT_B, "metric": "mcap", "threshold": "1m"})
+            await svc.set_token_alert_status(ctx.db, tid, "paused")
+            eid = await svc.create_exit_alert(ctx.db, ctx.data, {"ca": MINT_A})
+            await svc.delete_alert(ctx.db, "exit_alerts", eid)
+            await asyncio.sleep(0.05)
+        finally:
+            svc.set_notifier(None)
+        joined = "\n".join(msgs)
+        assert len(msgs) == 6, msgs
+        assert "Volume Scanner</b> turned ON" in joined and "Exit Alerts</b> module turned OFF" in joined
+        assert "Token alert #1" in joined and "OFF (paused)" in joined and "cancelled" in joined
     run(go())
 
 
@@ -279,29 +338,28 @@ def test_price_fallback_to_gecko(tmp_path):
     assert any("geckoterminal" in c for c in m.calls)
 
 
-def test_exit_alert_confirms_then_fires(tmp_path, monkeypatch):
+def test_exit_alert_fires_instantly_then_reminds(tmp_path):
     m = Market()
     m.candles = rising_candles()
-    last_close = m.candles[0][4]
-    m.price[MINT_A] = last_close * 1.01
-    monkeypatch.setattr(exit_alerts, "CONFIRM_MIN_GAP_S", 0)
+    m.price[MINT_A] = m.candles[0][4] * 1.01
 
     async def go():
-        ctx = await make_ctx(tmp_path, m)
+        ctx = await make_ctx(tmp_path, m, gmgn=True)
         aid = await svc.create_exit_alert(ctx.db, ctx.data, {"ca": MINT_A, "timeframe": "5m", "rsi_min": 60,
                                                              "bb_enabled": True, "bb_above_middle": "0"})
-        await exit_alerts.run_cycle(ctx)
+        await exit_alerts.run_cycle(ctx)                       # first check -> alert right away
         a = await ctx.db.get("exit_alerts", aid)
         assert a["last_error"] is None, a["last_error"]
-        assert a["last_rsi"] > 60 and a["pending_count"] == 1 and not ctx.notifier.sent
-        await exit_alerts.run_cycle(ctx)
         assert len(ctx.notifier.sent) == 1
         text, photo = ctx.notifier.sent[0]
-        assert "Exit Position Alert" in text and "RSI(14)" in text and "Monitoring ends in" in text
+        assert "Exit Position Alert" in text and "RSI(14)" in text and "Reminder every 5 min" in text
         assert photo and photo.endswith(".png")
-        await exit_alerts.run_cycle(ctx)  # already fired, not re-armed -> silent
+        assert any("openapi.gmgn.ai/v1/market/token_kline" in c for c in m.calls)  # GMGN candles used
+        await exit_alerts.run_cycle(ctx)                       # within 5 min -> silent
         assert len(ctx.notifier.sent) == 1
-        # expiry
+        await ctx.db.update("exit_alerts", aid, {"last_triggered": time.time() - 301})
+        await exit_alerts.run_cycle(ctx)                       # 5 min later, still true -> reminder
+        assert len(ctx.notifier.sent) == 2 and "reminder" in ctx.notifier.sent[1][0]
         await ctx.db.update("exit_alerts", aid, {"expires_at": time.time() - 1})
         await exit_alerts.run_cycle(ctx)
         assert (await ctx.db.get("exit_alerts", aid))["status"] == "expired"
@@ -309,16 +367,17 @@ def test_exit_alert_confirms_then_fires(tmp_path, monkeypatch):
     run(go())
 
 
-def test_exit_alert_rejects_bad_data(tmp_path):
+def test_exit_alert_no_extra_safeguards(tmp_path):
+    """Live price far from the candles and only a few candles: still evaluated and alerted."""
     m = Market()
-    m.candles = rising_candles()
-    m.price[MINT_A] = m.candles[0][4] * 3  # live price 200% away from candles
+    m.candles = rising_candles(n=20)
+    m.price[MINT_A] = m.candles[0][4] * 3
+
     async def go():
-        ctx = await make_ctx(tmp_path, m)
-        aid = await svc.create_exit_alert(ctx.db, ctx.data, {"ca": MINT_A, "rsi_min": 1})
+        ctx = await make_ctx(tmp_path, m)                    # no GMGN -> GeckoTerminal candles
+        await svc.create_exit_alert(ctx.db, ctx.data, {"ca": MINT_A, "rsi_min": 1})
         await exit_alerts.run_cycle(ctx)
-        a = await ctx.db.get("exit_alerts", aid)
-        assert "disagree" in (a["last_error"] or "") and not ctx.notifier.sent
+        assert len(ctx.notifier.sent) == 1
     run(go())
 
 
@@ -388,8 +447,10 @@ def test_telegram_screens_and_flows(tmp_path):
             check(await ui.route(path, db, ctx.data, context))
         await ui.route(["A", "tog"], db, ctx.data, context)
         assert (await db.scanner_settings())["enabled"] is True
-        await ui.route(["A", "tf", "1m"], db, ctx.data, context)
-        assert (await db.scanner_settings())["timeframe"] == "1m"
+        await ui.route(["A", "tf", "1h"], db, ctx.data, context)
+        assert (await db.scanner_settings())["timeframe"] == "1h"
+        with pytest.raises(svc.ValidationError):
+            await ui.route(["A", "tf", "1m"], db, ctx.data, context)
 
         # typed value for scanner
         context.user_data["pending"] = {"kind": "scanner", "field": "min_volume"}

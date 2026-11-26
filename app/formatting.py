@@ -93,11 +93,9 @@ def token_title(symbol: str | None, name: str | None) -> str:
 
 
 # ----------------------------------------------------------- alert bodies
-def scanner_alert(tok: dict, tf: str, vol: float | None, chg: float | None,
-                  dlmm_fees: float | None) -> str:
-    fees_line = f"Total fees: {usd(tok.get('fees'))}"
-    if dlmm_fees is not None:
-        fees_line += f"  ·  DLMM lifetime fees: {usd(dlmm_fees)}"
+def scanner_alert(tok: dict, tf: str, vol: float | None, chg: float | None) -> str:
+    src = "GMGN" if tok.get("source") == "gmgn" else "Jupiter"
+    fees_line = f"Total fees: {usd(tok.get('fees'))} ({src})" if tok.get("fees") is not None else "Total fees: n/a"
     return (
         "📡 <b>Volume Scanner Hit</b>\n"
         f"{token_title(tok.get('symbol'), tok.get('name'))}\n\n"
@@ -137,9 +135,9 @@ def token_alert(a: dict, value: float, tok: dict | None) -> str:
 
 
 def exit_alert(a: dict, res: dict, tok: dict | None, source_note: str = "",
-               meteora_pool: str | None = None) -> str:
+               meteora_pool: str | None = None, reminder: bool = False) -> str:
     lines = [
-        "🚪 <b>Exit Position Alert</b>",
+        "🔁 <b>Exit Position Alert — reminder</b>" if reminder else "🚪 <b>Exit Position Alert</b>",
         token_title((tok or {}).get("symbol") or a.get("symbol"), (tok or {}).get("name") or a.get("name")),
         f"Timeframe: {a['timeframe']} (live candle) · Logic: {'ALL' if a['combine'] == 'all' else 'ANY'}",
         "",

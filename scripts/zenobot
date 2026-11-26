@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# zenobot helper: manage the bot without remembering Docker commands.
+# Lives in the repository, so "zenobot update" also updates this helper.
+cd /opt/zenobot_alerts || exit 1
+case "${1:-help}" in
+  update)   git pull --ff-only && docker compose up -d --build && docker image prune -f >/dev/null && echo "Updated ✔" ;;
+  logs)     docker compose logs -f --tail=100 bot ;;
+  restart)  docker compose restart && echo "Restarted ✔" ;;
+  stop)     docker compose stop ;;
+  start)    docker compose up -d ;;
+  status)   docker compose ps ;;
+  edit)     ${EDITOR:-nano} .env && docker compose up -d && echo "Settings applied ✔" ;;
+  password) grep '^DASHBOARD_PASSWORD=' .env | cut -d= -f2- ;;
+  test)     docker compose exec -T bot python -m app.diag ;;
+  ip)       curl -4 -fsS https://api.ipify.org; echo ;;
+  *) echo "Usage: zenobot {update|logs|restart|stop|start|status|edit|password|test|ip}" ;;
+esac

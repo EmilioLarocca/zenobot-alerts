@@ -13,6 +13,10 @@ Recommended:
                          the bot invents one and sends it to you on Telegram.
 
 Optional (sensible defaults are used when missing):
+    GMGN_API_KEY         your GMGN OpenAPI key (https://gmgn.ai/ai). Strongly recommended:
+                         it powers the volume scanner (incl. total fees) and real-time
+                         candles for exit alerts. A read-only key (trading disabled) is enough.
+    GMGN_RPS             GMGN rate-limit units per second (default 4; free plan allows 5)
     JUPITER_API_KEY      free key from https://portal.jup.ag (doubles Jupiter speed)
     GECKO_RPM            GeckoTerminal calls per minute (default 8, keyless limit is ~5-10)
     JUPITER_RPM          Jupiter calls per minute (default 24 keyless / 50 with key)
@@ -61,6 +65,7 @@ class Config:
     chat_id: int
     dashboard_password: str | None
     jupiter_api_key: str | None
+    gmgn_api_key: str | None
     data_dir: Path
     volume_persistent: bool
     port: int
@@ -69,6 +74,7 @@ class Config:
     jupiter_rpm: int
     module_rpm: int
     meteora_rps: int
+    gmgn_rps: int
 
     @property
     def db_path(self) -> Path:
@@ -104,6 +110,7 @@ def load_config(require_telegram: bool = True) -> Config:
         chat_id=chat_id,
         dashboard_password=os.getenv("DASHBOARD_PASSWORD", "").strip() or None,
         jupiter_api_key=jup_key,
+        gmgn_api_key=os.getenv("GMGN_API_KEY", "").strip() or None,
         data_dir=data_dir,
         volume_persistent=persistent,
         port=_int("PORT", 8080),
@@ -112,4 +119,5 @@ def load_config(require_telegram: bool = True) -> Config:
         jupiter_rpm=_int("JUPITER_RPM", 50 if jup_key else 24),
         module_rpm=_int("MODULE_RPM", 15),
         meteora_rps=_int("METEORA_RPS", 5),
+        gmgn_rps=_int("GMGN_RPS", 4),
     )

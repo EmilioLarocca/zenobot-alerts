@@ -2,6 +2,9 @@
 datasources.py — everything that talks to the outside world (market data).
 
 Sources and what each one is used for:
+  * GMGN (openapi.gmgn.ai)              volume scanner (trending + total fees) and
+                                         real-time OHLCV candles for exit alerts
+                                         (needs GMGN_API_KEY; read-only key is enough)
   * Jupiter  (api.jup.ag)               live USD prices, market cap, 5m/1h/24h volume,
                                          price change, fees, logo, trending lists
   * GeckoTerminal (api.geckoterminal.com) OHLCV candles for RSI/Bollinger, 1-minute volume,
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,13 +29,14 @@ import httpx
 import pandas as pd
 
 from .config import Config
-from .ratelimit import RateLimiter
+from .ratelimit import RateLimiter, TokenBucket
 
 log = logging.getLogger("zenobot.data")
 
 JUP_BASE = "https://api.jup.ag"
 GECKO_BASE = "https://api.geckoterminal.com/api/v2"
 METEORA_BASE = "https://dlmm.datapi.meteora.ag"
+GMGN_BASE = "https://openapi.gmgn.ai"
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -43,7 +48,10 @@ BASE_TOKENS = {SOL_MINT, USDC_MINT, USDT_MINT}
 TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
 GECKO_TF = {"1m": ("minute", 1), "5m": ("minute", 5), "15m": ("minute", 15), "1h": ("hour", 1), "4h": ("hour", 4)}
 METEORA_TF = {"5m": "5m", "1h": "1h", "4h": "4h"}  # Meteora has no 1m / 15m candles
-OHLCV_TTL = {"1m": 30, "5m": 45, "15m": 60, "1h": 90, "4h": 120}  # cache seconds per timeframe
+OHLCV_TTL = {"1m": 30, "5m": 45, "15m": 60, "1h": 90, "4h": 120}  # GeckoTerminal cache seconds
+# GMGN candles are refreshed often; the live Jupiter price updates the running candle in between
+GMGN_KLINE_TTL = {"1m": 15, "5m": 20, "15m": 25, "1h": 30, "4h": 30}
+GMGN_ROUTE_WEIGHT = {"rank": 3, "kline": 2}  # rate-limit cost of each GMGN route
 
 
 class SourceError(Exception):
@@ -151,25 +159,73 @@ def normalize_gecko_token(attrs: dict) -> dict:
     }
 
 
+def normalize_gmgn_rank(item: dict, interval: str) -> dict:
+    """Turn a GMGN trending (rank) item into the bot's standard token dict."""
+    vol = {"5m": None, "1h": None, "6h": None, "24h": None}
+    chg = {"5m": _f(item.get("price_change_percent5m")), "1h": _f(item.get("price_change_percent1h")),
+           "6h": None, "24h": None}
+    vol[interval] = _f(item.get("volume"))
+    if _f(item.get("price_change_percent")) is not None:
+        chg[interval] = _f(item.get("price_change_percent"))
+    # GMGN's documented filter is "total_fee"; read it under the names it may use in responses
+    fees = None
+    for k in ("total_fee", "total_fees", "totalFee", "fee_total"):
+        if _f(item.get(k)) is not None:
+            fees = _f(item.get(k))
+            break
+    return {
+        "mint": item.get("address"),
+        "symbol": item.get("symbol") or "?",
+        "name": item.get("name") or "",
+        "icon": item.get("logo"),
+        "price_usd": _f(item.get("price")),
+        "mcap": _f(item.get("market_cap")),
+        "fdv": None,
+        "liquidity": _f(item.get("liquidity")),
+        "fees": fees,
+        "volume": vol,
+        "change": chg,
+        "organic_score": None,
+        "is_sus": False,
+        "source": "gmgn",
+    }
+
+
 class DataHub:
-    def __init__(self, cfg: Config, client: httpx.AsyncClient | None = None):
+    def __init__(self, cfg: Config, client: httpx.AsyncClient | None = None,
+                 gmgn_client: httpx.AsyncClient | None = None):
         self.cfg = cfg
+        gmgn_rate = max(1, cfg.gmgn_rps)
         self.limiter = RateLimiter(
             {"jupiter": cfg.jupiter_rpm, "gecko": cfg.gecko_rpm, "meteora": cfg.meteora_rps * 60},
             cfg.module_rpm,
+            # GMGN uses a weighted bucket: each route costs 1–3 units (free plan: 5 units/s)
+            extra_buckets={"gmgn": TokenBucket(gmgn_rate, capacity=gmgn_rate)},
         )
         self.client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(15.0),
             headers={"User-Agent": "zenobot_alerts/1.0", "Accept": "application/json"},
             follow_redirects=True,
         )
+        # GMGN only works over IPv4: binding to 0.0.0.0 forces IPv4 connections
+        self.gmgn_client = gmgn_client or (httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0),
+            transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0"),
+            headers={"User-Agent": "zenobot_alerts/1.1", "Accept": "application/json"},
+        ) if cfg.gmgn_api_key else None)
         self.cache = TTLCache()
         self.health: dict[str, dict[str, Any]] = {
-            s: {"ok_at": None, "err_at": None, "error": None} for s in ("jupiter", "gecko", "meteora")
+            s: {"ok_at": None, "err_at": None, "error": None} for s in ("gmgn", "jupiter", "gecko", "meteora")
         }
+
+    @property
+    def has_gmgn(self) -> bool:
+        return bool(self.cfg.gmgn_api_key and self.gmgn_client)
 
     async def close(self) -> None:
         await self.client.aclose()
+        if self.gmgn_client:
+            await self.gmgn_client.aclose()
 
     # ------------------------------------------------------------ raw GET
     async def _get(self, host: str, url: str, params: dict | None = None, module: str = "system",
@@ -210,6 +266,82 @@ class DataHub:
             ok = s["ok_at"] is not None and (s["err_at"] is None or s["ok_at"] >= s["err_at"])
             out[h] = {**s, "healthy": ok if (s["ok_at"] or s["err_at"]) else None}
         return out
+
+    # =================================================================== GMGN
+    async def _gmgn(self, path: str, params: dict, route: str, module: str = "system", wait: float = 20.0) -> Any:
+        """Call GMGN OpenAPI (read-only "exist" auth: X-APIKEY + timestamp + client_id)."""
+        if not self.has_gmgn:
+            raise SourceError("gmgn: no GMGN_API_KEY configured")
+        weight = GMGN_ROUTE_WEIGHT.get(route, 1)
+        if not await self.limiter.acquire("gmgn", module, timeout=wait, weight=weight):
+            raise SourceError("gmgn: rate budget busy, request skipped")
+        q = {**params, "timestamp": int(time.time()), "client_id": str(uuid.uuid4())}
+        try:
+            r = await self.gmgn_client.get(f"{GMGN_BASE}{path}", params=q,
+                                           headers={"X-APIKEY": self.cfg.gmgn_api_key})
+        except httpx.HTTPError as e:
+            self._bad("gmgn", f"network error: {e.__class__.__name__}")
+            raise SourceError(f"gmgn: network error {e!r}") from e
+        try:
+            body = r.json()
+        except ValueError:
+            body = {}
+        if r.status_code == 429 or body.get("code") == 429:
+            reset = _f(body.get("reset_at")) or _f(r.headers.get("x-ratelimit-reset"))
+            pause = (reset - time.time()) if reset else 30.0
+            self.limiter.penalize("gmgn", min(max(pause, 5.0), 300.0))
+            self._bad("gmgn", f"429 {body.get('error') or 'rate limited'}")
+            raise SourceError("gmgn: 429 rate limited")
+        if r.status_code >= 400 or body.get("code", 0) != 0:
+            msg = f"{body.get('error') or ''} {body.get('message') or ''}".strip() or f"HTTP {r.status_code}"
+            self._bad("gmgn", msg[:200])
+            raise SourceError(f"gmgn: {msg}")
+        self.health["gmgn"]["ok_at"] = time.time()
+        return body.get("data")
+
+    async def gmgn_rank(self, interval: str, module: str, **filters: Any) -> list[dict]:
+        """GMGN trending tokens on Solana for 1m/5m/1h/6h/24h, with server-side filters."""
+        params = {"chain": "sol", "interval": interval, "limit": 100, "order_by": "volume", "direction": "desc"}
+        params.update({k: v for k, v in filters.items() if v not in (None, 0, "")})
+        key = ("grank", tuple(sorted(params.items())))
+        hit = self.cache.get(key)
+        if not self.cache.is_miss(hit):
+            return hit
+        data = await self._gmgn("/v1/market/rank", params, "rank", module)
+        items = (data or {}).get("rank") if isinstance(data, dict) else data
+        toks = [normalize_gmgn_rank(i, interval) for i in (items or []) if isinstance(i, dict) and i.get("address")]
+        self.cache.set(key, toks, 30)
+        return toks
+
+    async def gmgn_kline(self, mint: str, tf: str, periods: int, module: str) -> pd.DataFrame:
+        """USD candles from GMGN (oldest -> newest), including the running candle."""
+        key = ("gkline", mint, tf, periods)
+        hit = self.cache.get(key)
+        if not self.cache.is_miss(hit):
+            return hit
+        now = int(time.time())
+        params = {"chain": "sol", "address": mint, "resolution": tf,
+                  # the official GMGN client sends from/to in milliseconds
+                  "from": (now - TF_SECONDS[tf] * (periods + 2)) * 1000, "to": now * 1000}
+        data = await self._gmgn("/v1/market/token_kline", params, "kline", module)
+        rows = (data or {}).get("list") if isinstance(data, dict) else data
+        recs = []
+        for c in rows or []:
+            t = _f(c.get("time"))
+            if t is None:
+                continue
+            if t > 1e12:  # milliseconds -> seconds
+                t /= 1000
+            o, h, l, cl = (_f(c.get(k)) for k in ("open", "high", "low", "close"))
+            if None in (o, h, l, cl):
+                continue
+            recs.append({"ts": int(t), "open": o, "high": h, "low": l, "close": cl,
+                         "volume": _f(c.get("amount")) or 0.0})  # amount = USD volume
+        df = pd.DataFrame(recs, columns=["ts", "open", "high", "low", "close", "volume"])
+        if len(df):
+            df = df.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
+        self.cache.set(key, df, GMGN_KLINE_TTL.get(tf, 20))
+        return df
 
     # ================================================================ JUPITER
     async def jup_prices(self, mints: list[str], module: str) -> dict[str, dict]:
@@ -449,13 +581,21 @@ class DataHub:
 
     async def candles(self, mint: str, tf: str, limit: int, module: str) -> CandleSet:
         """
-        OHLCV candles in USD for RSI/Bollinger. GeckoTerminal first; Meteora DLMM
-        as fallback (only 5m/1h/4h). Raises SourceError when nothing works.
+        OHLCV candles in USD for RSI/Bollinger. GMGN first (real-time, needs a key),
+        then GeckoTerminal, then Meteora DLMM (only 5m/1h/4h). Raises SourceError when nothing works.
         """
+        errors = []
+        if self.has_gmgn:
+            try:
+                df = await self.gmgn_kline(mint, tf, limit, module)
+                if len(df):
+                    return CandleSet(df=df, source="gmgn", pool="", fetched_at=time.time())
+                errors.append("GMGN returned no candles")
+            except SourceError as e:
+                errors.append(str(e))
         pools = await self.best_pool(mint, module)
         if not pools:
-            raise SourceError("no liquidity pool found for this token")
-        errors = []
+            raise SourceError("; ".join(errors + ["no liquidity pool found for this token"]))
         if pools["gecko"]:
             try:
                 rows = await self.gecko_ohlcv(pools["gecko"], tf, mint, limit, module)

@@ -107,6 +107,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   done
   PASS="$(ask_secret "Dashboard password (Enter = generate one for you)")"
   if [[ -z "$PASS" ]]; then PASS="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)"; GENERATED=1; fi
+  GMGN="$(ask_secret "GMGN API key (recommended; Enter to skip, hidden while typing)")"
   JUP="$(ask "Jupiter API key (optional, press Enter to skip)")"
 
   IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org || curl -4 -fsS --max-time 10 https://ifconfig.me || true)"
@@ -122,6 +123,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 TELEGRAM_BOT_TOKEN=$TOKEN
 CHAT_ID=$CHAT
 DASHBOARD_PASSWORD=$PASS
+GMGN_API_KEY=$GMGN
 JUPITER_API_KEY=$JUP
 DOMAIN=$DOMAIN
 EOF
@@ -130,6 +132,11 @@ EOF
 else
   ok "Keeping your existing settings ($ENV_FILE)"
   DOMAIN="$(get_env DOMAIN)"; PASS="$(get_env DASHBOARD_PASSWORD)"
+  if ! grep -q '^GMGN_API_KEY=' "$ENV_FILE"; then
+    GMGN="$(ask_secret "GMGN API key (recommended; Enter to skip, hidden while typing)")"
+    echo "GMGN_API_KEY=$GMGN" >> "$ENV_FILE"
+    ok "GMGN key saved"
+  fi
 fi
 
 # --------------------------------------------------------------- 4. firewall
@@ -141,22 +148,10 @@ ufw --force enable >/dev/null
 ok "Firewall on"
 
 # ------------------------------------------------------------ 5. helper cmd
-cat > /usr/local/bin/zenobot <<'EOF'
-#!/usr/bin/env bash
-# zenobot helper: manage the bot without remembering Docker commands
-cd /opt/zenobot_alerts || exit 1
-case "${1:-help}" in
-  update)  git pull --ff-only && docker compose up -d --build && docker image prune -f >/dev/null && echo "Updated ✔" ;;
-  logs)    docker compose logs -f --tail=100 bot ;;
-  restart) docker compose restart && echo "Restarted ✔" ;;
-  stop)    docker compose stop ;;
-  start)   docker compose up -d ;;
-  status)  docker compose ps ;;
-  edit)    ${EDITOR:-nano} .env && docker compose up -d && echo "Settings applied ✔" ;;
-  password) grep '^DASHBOARD_PASSWORD=' .env | cut -d= -f2- ;;
-  *) echo "Usage: zenobot {update|logs|restart|stop|start|status|edit|password}" ;;
-esac
-EOF
+# The real "zenobot" command lives in the repository (scripts/zenobot), so updates
+# refresh it too. This small launcher just runs it (no file permission changes in git).
+rm -f /usr/local/bin/zenobot
+printf '#!/usr/bin/env bash\nexec bash /opt/zenobot_alerts/scripts/zenobot "$@"\n' > /usr/local/bin/zenobot
 chmod +x /usr/local/bin/zenobot
 
 # ------------------------------------------------------------------ 6. start
@@ -186,6 +181,7 @@ cat <<EOF
     zenobot update    download the latest code from GitHub and restart
     zenobot edit      change token / chat id / password
     zenobot password  show the dashboard password
+    zenobot test      check the GMGN key and data sources
     zenobot status    is it running?
 =====================================================================
 EOF

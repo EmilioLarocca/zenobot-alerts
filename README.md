@@ -4,9 +4,11 @@ A 24/7 alert bot for Solana tokens and Meteora DLMM positions. You control it fr
 
 | Module | What it does |
 |---|---|
-| 📡 **A: Global Volume Scanner** | Scans trending and new Solana tokens every minute. Alerts when volume (1m / 5m / 1h / 24h), market cap range and total fees match your filters. Has a cooldown per token and a blacklist. |
+| 📡 **A: Global Volume Scanner** | Scans trending Solana tokens every minute using GMGN. Alerts when volume (5m / 1h / 24h), market cap range and GMGN total fees match your filters. Has a cooldown per token and a blacklist. |
 | 🎯 **B: Token Alerts** | Watches specific tokens for a Volume, Price (USD or SOL) or Market-cap threshold. Sends **"Special Alert Hit!"** when it is reached. |
-| 🚪 **C: Exit Alerts** | Watches RSI and/or Bollinger Bands on a **live** (still-open) candle: 1m / 5m / 15m / 1h / 4h. Turns itself off after the duration you choose. |
+| 🚪 **C: Exit Alerts** | Watches RSI and/or Bollinger Bands on a **live** (still-open) candle every 10 seconds: 1m / 5m / 15m / 1h / 4h. Alerts instantly, then reminds you every 5 minutes while the condition holds. Turns itself off after the duration you choose. |
+
+Every time you switch something **ON or OFF**, from Telegram or the dashboard, the bot sends you a Telegram message confirming it. That covers the scanner, a module, or a single alert.
 
 **Hosting:** a **Hetzner CX23** server (2 vCPU, 4 GB RAM, 40 GB disk) at about **€7.31/month** including the IPv4 address and Italian VAT. All data APIs are free.
 
@@ -67,12 +69,25 @@ It asks for:
 2. your Telegram token (hidden while you type)
 3. your Chat ID
 4. a dashboard password (press Enter to have one generated)
-5. a Jupiter key (optional, press Enter to skip)
-6. the dashboard address: press **Enter** to accept the suggestion
+5. your **GMGN API key** (recommended, see below; hidden while you type)
+6. a Jupiter key (optional, press Enter to skip)
+7. the dashboard address: press **Enter** to accept the suggestion
 
 The suggested address looks like `https://203-0-113-7.sslip.io`. It's a free address made from your server's IP, with a real HTTPS certificate.
 
 The first build takes about 5 minutes. Then you get **"✅ zenobot_alerts is online"** on Telegram.
+
+### GMGN API key (recommended)
+The GMGN key powers the volume scanner, including **total fees**, and the **real-time candles** for exit alerts. A read-only key is enough, with trading disabled.
+1. Create the key at **gmgn.ai/ai**.
+2. If your key has an **IP whitelist**, add your server's IP (run `zenobot ip` on the server to see it).
+3. To add or change the key later, run `zenobot edit` and fill in `GMGN_API_KEY=`.
+4. Check it works with `zenobot test`.
+
+Without a key the bot still runs, with three differences:
+- the scanner uses Jupiter's lists
+- the total-fees filter is skipped
+- exit alerts use the slower GeckoTerminal candles, which only handle about 5–8 alerts
 
 ### Step 7: Open the dashboard
 Open the address the installer printed. Log in with username **`admin`** and your password. Send `/dashboard` to the bot at any time to get the link again, and run `zenobot password` on the server to see the password.
@@ -111,6 +126,8 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 | `zenobot logs` | live logs (Ctrl+C to exit) |
 | `zenobot edit` | change token, chat id or password (save with Ctrl+O, Enter, Ctrl+X) |
 | `zenobot password` | show the dashboard password |
+| `zenobot test` | check the GMGN key and data sources |
+| `zenobot ip` | show the server's IP (for the GMGN whitelist) |
 | `zenobot status` | check it's running |
 | `zenobot restart` | restart the bot |
 
@@ -128,11 +145,8 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 
 ### How alerts behave
 - **Scanner:** a token alerts at most once per *cooldown* period. Blacklisted tokens, SOL, USDC and USDT are always ignored. At most 8 alerts are sent per scan, so a market-wide pump can't flood you.
-- **Token and Exit alerts fire once per crossing.** After firing, an alert "re-arms" once the condition is no longer true. You get one message per move, not one every 30 seconds.
-- **Exit alerts and false signals:**
-  - A signal must be seen on **2 checks in a row**, at least 20 seconds apart.
-  - The candle data must be fresh, and there must be enough history for your indicator lengths.
-  - The live price must agree with the candles.
+- **Token alerts fire once per crossing.** After firing, an alert "re-arms" once the condition is no longer true.
+- **Exit alerts are real-time.** They're checked every 10 seconds on the live candle, using the latest Jupiter price, and alert as soon as the condition is met. While it stays met, you get a **reminder every 5 minutes** (`REMINDER_MINUTES` in `app/modules/exit_alerts.py`). There are no extra confirmation filters. The only limit is mathematical: a brand-new token needs at least as many candles as the indicator length (for example 15 candles for RSI 14).
 - **RSI + BB together:** "ALL must hit" (default) needs both indicators. "ANY can hit" needs only one. If both indicators are OFF, the alert won't switch on and you get a warning.
 - **Bollinger option:** fill **either** "Min above Middle Band %" **or** "Min above Upper Band %". `0` means touching or above the band; `2` means at least 2% above it.
 - **Exit alert durations:** when the time runs out, you get a "monitoring ended" message. Changing the duration of a running alert restarts the countdown from now.
@@ -143,17 +157,17 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 
 | Need | Source | Notes |
 |---|---|---|
-| Live price, 24h change | Jupiter Price API V3 | Batches of 50 tokens per request. Falls back to GeckoTerminal if Jupiter fails. |
-| Market cap, 5m/1h/24h volume, logo, trending lists | Jupiter Tokens API V2 | Batches of up to 100 tokens per request. |
-| Candles for RSI/BB, 1-minute volume | GeckoTerminal | Free, but the no-key limit is only about **5–10 calls/min**. The bot caches data and limits itself to 8/min. |
-| Lifetime DLMM pool fees, backup candles | Meteora DLMM API | 30 requests/sec, no key needed. Backup candles only exist for 5m/1h/4h. |
+| Scanner list (5m/1h/24h volume, market cap, **total fees**) | **GMGN OpenAPI** | Needs `GMGN_API_KEY`. Volume, market-cap and fee filters are applied by GMGN itself. |
+| Candles for RSI/BB (real-time) | **GMGN OpenAPI** | All timeframes 1m–4h. The free GMGN plan allows about 5 units/s, so **10–15+ exit alerts** stay real-time. |
+| Live price, 24h change | Jupiter Price API V3 | One batched request every 10 seconds for all exit alerts. |
+| Token info (market cap, 5m volume, logo) | Jupiter Tokens API V2 | Used for token alerts and alert messages. Also the scanner backup without a GMGN key. |
+| Backup candles | GeckoTerminal, then Meteora DLMM | Used only if GMGN fails or there's no key. GeckoTerminal's free limit is about 5–10 calls/min. |
 
-- **Rate limiting:** each API has a token bucket, and each module has its own budget of **15 calls/min** to Jupiter and GeckoTerminal (`MODULE_RPM`). After an HTTP 429 the bot pauses that API automatically.
-- **Caching:** prices are cached for about 20 seconds. Candles are cached for 30–120 seconds depending on the timeframe. Trending lists are cached for 45 seconds to 5 minutes.
-- **"Total fees":** GMGN has no public API. The bot shows Jupiter's `fees` field (USD) and also the lifetime fees of the token's **Meteora DLMM pools**. In the scanner you can choose which one the "Min fees" filter uses.
-- **1m volume** isn't published by Jupiter. For the 1m timeframe the scanner first filters by 5m volume, then checks real 1m candles for the top 3 candidates per scan.
-- **How many exit alerts can run?** With the free GeckoTerminal limit, about **5–8 active exit alerts** stay fully fresh. More still work, but each one updates less often.
-- **Meteora backup candles:** if GeckoTerminal is down, the bot uses Meteora candles, rescaled to the live USD price. The alert message says so when this happens.
+- **Rate limiting:** each API has its own token bucket. GMGN's is weighted the way GMGN counts it: a candle request costs 2 units and a trending request 3 (`GMGN_RPS`, default 4 units/s). After an HTTP 429 the bot pauses that API automatically.
+- **Why not a GeckoTerminal API key?** CoinGecko's free key allows only 10,000 calls a month, and the $35 plan 100,000. Fifteen real-time exit alerts need far more than that, so GMGN replaces GeckoTerminal for candles.
+- **Total fees** come from GMGN, the same figure as on gmgn.ai. Run `zenobot test` to see the fee fields your key returns.
+- **1m volume** was removed from the scanner, which now offers only 5m / 1h / 24h.
+
 
 ---
 
@@ -168,7 +182,8 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 | `zenobot update` says "not possible to fast-forward" | Run `cd /opt/zenobot_alerts && git fetch && git reset --hard origin/main`, then `zenobot update`. This keeps your settings. |
 | Installer says "Could not download the repository" | The repository is private or the address is wrong. Make it public, or see "Private repository" above. |
 | Exit alert shows ⚠️ "only N candles of history" | The token is too new for your RSI/BB lengths. Use a smaller timeframe or shorter lengths, or wait. |
-| Many "429 rate limited" in `/status` | Normal from time to time. Lower `GECKO_RPM` to 5 or reduce the number of exit alerts. |
+| Many "429 rate limited" in `/status` | Normal from time to time. For GMGN, lower `GMGN_RPS` to 3 with `zenobot edit`. |
+| `zenobot test` says `AUTH_IP_BLOCKED` | Add the server IP (`zenobot ip`) to your GMGN key's IP whitelist on gmgn.ai. |
 
 ---
 
@@ -205,6 +220,7 @@ zenobot_alerts/
 ├── railway.json             (only for Railway hosting)
 ├── fly.toml                 (only for Fly.io hosting)
 ├── install.sh               one-command installer for Hetzner / any Ubuntu VPS
+├── scripts/zenobot          the "zenobot" server command (update, logs, test…)
 ├── docker-compose.yml       VPS setup: bot + Caddy (automatic HTTPS)
 ├── Caddyfile                HTTPS web server config for the dashboard
 ├── .env.example             list of the settings (environment variables)
@@ -219,6 +235,7 @@ zenobot_alerts/
 │   ├── notifier.py          sends messages to Telegram safely
 │   ├── telegram_ui.py       Telegram menus, buttons and step-by-step questions
 │   ├── context.py           shared objects
+│   ├── diag.py              "zenobot test": checks the GMGN key and data sources
 │   ├── modules/
 │   │   ├── scanner.py       Module A
 │   │   ├── token_alerts.py  Module B
@@ -233,12 +250,12 @@ zenobot_alerts/
 To change any of these, edit the file on GitHub (pencil icon → Commit), then run `zenobot update` on the server.
 
 - **Scan frequency or max alerts per scan:** the top of `app/modules/scanner.py`, `INTERVAL_S` and `MAX_ALERTS_PER_SCAN`.
-- **Exit-alert confirmation strictness:** the top of `app/modules/exit_alerts.py`, `CONFIRM_CHECKS` and `MAX_PRICE_GAP`.
+- **Exit-alert check speed and reminder interval:** the top of `app/modules/exit_alerts.py`, `INTERVAL_S` (10 s) and `REMINDER_MINUTES` (5).
 - **Default scanner values:** `DEFAULT_SCANNER` in `app/db.py`.
 - **Alert message wording:** `app/formatting.py`.
 
 ### Optional variables
-Add these with `zenobot edit`, one per line like `GECKO_RPM=5`: `JUPITER_API_KEY`, `GECKO_RPM` (default 8), `JUPITER_RPM` (24 without a key, 50 with one), `MODULE_RPM` (15), `METEORA_RPS` (5).
+Add these with `zenobot edit`, one per line like `GMGN_RPS=3`: `GMGN_API_KEY`, `GMGN_RPS` (default 4), `JUPITER_API_KEY`, `GECKO_RPM` (default 8), `JUPITER_RPM` (24 without a key, 50 with one), `MODULE_RPM` (15), `METEORA_RPS` (5).
 
 
 *Not financial advice. Alerts depend on third-party data that can be delayed or wrong. Always double-check before acting.*
