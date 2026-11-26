@@ -2,8 +2,9 @@
 datasources.py — everything that talks to the outside world (market data).
 
 Sources and what each one is used for:
-  * GMGN (openapi.gmgn.ai)              ONLY the "Total Fees" number (in SOL) for the
-                                         volume scanner (needs GMGN_API_KEY, read-only is enough)
+  * Metlex (metlex.io)                  "Total Fees" (SOL) for any token — same as the previous bot
+  * GMGN (openapi.gmgn.ai)              list of every token above your volume threshold (scanner
+                                         discovery) + backup for "Total Fees". Needs GMGN_API_KEY.
   * Jupiter  (api.jup.ag)               live USD prices, market cap, 5m/1h/24h volume,
                                          price change, fees, logo, trending lists
   * GeckoTerminal (api.geckoterminal.com) OHLCV candles for RSI/Bollinger, 1-minute volume,
@@ -36,6 +37,9 @@ JUP_BASE = "https://api.jup.ag"
 GECKO_BASE = "https://api.geckoterminal.com/api/v2"
 METEORA_BASE = "https://dlmm.datapi.meteora.ag"
 GMGN_BASE = "https://openapi.gmgn.ai"
+METLEX_FEES_URL = "https://www.metlex.io/api/gmgn/token-info"
+# Metlex also relays Jupiter's token lists: this is the exact URL your previous bot used
+METLEX_JUP_BASE = "https://www.metlex.io/api/jupiter/api"
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -48,7 +52,8 @@ TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
 GECKO_TF = {"1m": ("minute", 1), "5m": ("minute", 5), "15m": ("minute", 15), "1h": ("hour", 1), "4h": ("hour", 4)}
 METEORA_TF = {"5m": "5m", "1h": "1h", "4h": "4h"}  # Meteora has no 1m / 15m candles
 OHLCV_TTL = {"1m": 30, "5m": 45, "15m": 60, "1h": 90, "4h": 120}  # GeckoTerminal cache seconds
-GMGN_ROUTE_WEIGHT = {"rank": 3}  # rate-limit cost of each GMGN route
+GMGN_ROUTE_WEIGHT = {"rank": 3, "token_info": 1}  # rate-limit cost of each GMGN route
+GECKO_TRENDING_DURATION = {"5m": "5m", "1h": "1h", "24h": "24h"}
 
 
 class SourceError(Exception):
@@ -203,7 +208,8 @@ class DataHub:
         gmgn_rate = max(1, cfg.gmgn_rps)
         gmgn_capacity = max(3, gmgn_rate)  # must fit the heaviest route (trending = 3 units)
         self.limiter = RateLimiter(
-            {"jupiter": cfg.jupiter_rpm, "gecko": cfg.gecko_rpm, "meteora": cfg.meteora_rps * 60},
+            {"jupiter": cfg.jupiter_rpm, "gecko": cfg.gecko_rpm, "meteora": cfg.meteora_rps * 60,
+             "metlex": 40},
             cfg.module_rpm,
             # GMGN uses a weighted bucket: each route costs 1–3 units (free plan: 5 units/s)
             extra_buckets={"gmgn": TokenBucket(gmgn_rate, capacity=gmgn_capacity)},
@@ -221,7 +227,8 @@ class DataHub:
         ) if cfg.gmgn_api_key else None)
         self.cache = TTLCache()
         self.health: dict[str, dict[str, Any]] = {
-            s: {"ok_at": None, "err_at": None, "error": None} for s in ("gmgn", "jupiter", "gecko", "meteora")
+            s: {"ok_at": None, "err_at": None, "error": None}
+            for s in ("gmgn", "jupiter", "gecko", "meteora", "metlex")
         }
 
     @property
@@ -239,6 +246,8 @@ class DataHub:
         if not await self.limiter.acquire(host, module, timeout=wait):
             raise SourceError(f"{host}: rate budget busy, request skipped")
         headers = {"x-api-key": self.cfg.jupiter_api_key} if host == "jupiter" and self.cfg.jupiter_api_key else None
+        if host == "metlex":
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; zenobot_alerts/1.2)"}
         try:
             r = await self.client.get(url, params=params, headers=headers)
         except httpx.HTTPError as e:
@@ -319,6 +328,36 @@ class DataHub:
         self.cache.set(key, toks, 60)
         return toks
 
+    async def token_total_fees(self, mint: str, module: str) -> tuple[float | None, str | None]:
+        """
+        Lifetime "Total Fees" of ANY token, in SOL — exactly like the previous bot:
+        Metlex token-info `total_fee` first, GMGN (your key) as backup. -> (value, source) or (None, None).
+        """
+        key = ("tfees", mint)
+        hit = self.cache.get(key)
+        if not self.cache.is_miss(hit):
+            return hit
+        res: tuple[float | None, str | None] = (None, None)
+        try:
+            data = await self._get("metlex", METLEX_FEES_URL, {"address": mint}, module, wait=10)
+            inner = unwrap_gmgn(data) if isinstance(data, dict) else None
+            v = _f(inner.get("total_fee")) if isinstance(inner, dict) else None
+            if v is not None:
+                res = (v, "Metlex")
+        except SourceError as e:
+            log.info("Metlex fees failed for %s: %s", mint, e)
+        if res[0] is None and self.has_gmgn:
+            try:
+                data = await self._gmgn("/v1/token/info", {"chain": "sol", "address": mint}, "token_info", module)
+                v = _f((data or {}).get("total_fee")) if isinstance(data, dict) else None
+                if v is not None:
+                    res = (v, "GMGN")
+            except SourceError as e:
+                log.info("GMGN token info failed for %s: %s", mint, e)
+        # remember a found value for 3 min; a miss for 1 min (so a short outage heals quickly)
+        self.cache.set(key, res, 180 if res[0] is not None else 60)
+        return res
+
     # ================================================================ JUPITER
     async def jup_prices(self, mints: list[str], module: str) -> dict[str, dict]:
         """Live USD price + 24h change for up to 50 mints per request."""
@@ -361,15 +400,36 @@ class DataHub:
                 self.cache.set(("jtok", m), found.get(m), 30)
         return out
 
-    async def jup_category(self, category: str, interval: str, module: str, limit: int = 100) -> list[dict]:
-        """Jupiter lists: toptrending / toptraded / toporganicscore over 5m|1h|6h|24h."""
+    async def jup_category(self, category: str, interval: str, module: str, limit: int = 100,
+                           prefer: str = "jupiter") -> list[dict]:
+        """
+        Jupiter lists: toptrending / toptraded / toporganicscore over 5m|1h|6h|24h.
+        Two routes to the same Jupiter data: directly (api.jup.ag) or relayed by Metlex
+        (what your previous bot used). `prefer` picks the first route; the other is the backup.
+        Spreading the scanner's lists over both routes keeps each one far below its rate limit.
+        """
         key = ("jcat", category, interval)
         hit = self.cache.get(key)
         if not self.cache.is_miss(hit):
             return hit
-        data = await self._get("jupiter", f"{JUP_BASE}/tokens/v2/{category}/{interval}", {"limit": limit}, module)
+        routes = [("jupiter", JUP_BASE), ("metlex", METLEX_JUP_BASE)]
+        if prefer == "metlex":
+            routes.reverse()
+        data, err = None, None
+        for host, base in routes:
+            try:
+                data = await self._get(host, f"{base}/tokens/v2/{category}/{interval}", {"limit": limit},
+                                       module, wait=8)
+                if isinstance(data, dict):  # some relays wrap the list
+                    data = data.get("data") or data.get("tokens") or []
+                break
+            except SourceError as e:
+                err = e
+                log.info("%s %s via %s failed: %s", category, interval, host, e)
+        if data is None:
+            raise err or SourceError(f"{category}: no route answered")
         toks = [normalize_jupiter_token(t) for t in (data or []) if isinstance(t, dict)]
-        self.cache.set(key, toks, 45)
+        self.cache.set(key, toks, 8)    # the scanner runs every 10 s: always fresh data
         for t in toks:
             self.cache.set(("jtok", t["mint"]), t, 30)
         return toks
@@ -425,13 +485,22 @@ class DataHub:
         self.cache.set(key, rows, OHLCV_TTL[tf])
         return rows
 
-    async def gecko_pool_list(self, kind: str, module: str) -> list[str]:
+    async def gecko_pool_list(self, kind: str, module: str, duration: str | None = None) -> list[str]:
         """kind = 'trending_pools' | 'new_pools'. Returns base-token mints."""
-        key = ("glist", kind)
+        key = ("glist", kind, duration)
         hit = self.cache.get(key)
         if not self.cache.is_miss(hit):
             return hit
-        data = await self._get("gecko", f"{GECKO_BASE}/networks/solana/{kind}", {"page": 1}, module, wait=5)
+        params: dict[str, Any] = {"page": 1}
+        if duration and kind == "trending_pools":
+            params["duration"] = duration  # trending over the same window as your scanner
+        try:
+            data = await self._get("gecko", f"{GECKO_BASE}/networks/solana/{kind}", params, module, wait=5)
+        except SourceError:
+            if "duration" not in params:
+                raise
+            params.pop("duration")
+            data = await self._get("gecko", f"{GECKO_BASE}/networks/solana/{kind}", params, module, wait=5)
         mints = []
         for p in (data or {}).get("data") or []:
             bid = (((p.get("relationships") or {}).get("base_token") or {}).get("data") or {}).get("id", "")

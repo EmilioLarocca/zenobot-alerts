@@ -12,8 +12,7 @@ case "${1:-help}" in
   edit)     ${EDITOR:-nano} .env && docker compose up -d && echo "Settings applied ✔" ;;
   password) grep '^DASHBOARD_PASSWORD=' .env | cut -d= -f2- ;;
   test)     docker compose exec -T bot python -m app.diag ;;
-  fees)     docker compose exec -T bot python -m app.diag fees ;;
   scan)     docker compose exec -T bot python -m app.diag scan ;;
   ip)       curl -4 -fsS https://api.ipify.org; echo ;;
-  *) echo "Usage: zenobot {update|logs|restart|stop|start|status|edit|password|test|fees|scan|ip}" ;;
+  *) echo "Usage: zenobot {update|logs|restart|stop|start|status|edit|password|test|scan|ip}" ;;
 esac

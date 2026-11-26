@@ -89,6 +89,7 @@
     <span class="pill" id="h-jupiter"><span class="dot"></span>Jupiter</span>
     <span class="pill" id="h-gecko"><span class="dot"></span>GeckoTerminal</span>
     <span class="pill" id="h-meteora"><span class="dot"></span>Meteora</span>
+    <span class="pill" id="h-metlex"><span class="dot"></span>Metlex</span>
   </div>
 </header>
 
@@ -106,7 +107,7 @@
     <div class="card">
       <div class="row">
         <div><h2>Global Volume Scanner</h2>
-          <p class="sub">Scans trending &amp; new Solana tokens every minute (Jupiter + GeckoTerminal). Total fees come from GMGN.</p></div>
+          <p class="sub">Every 10 seconds: Jupiter's top traded + trending lists for your timeframe (complete above your threshold). Total fees per token from Metlex (GMGN backup).</p></div>
         <label class="sw"><span id="sc-state">OFF</span>
           <span class="switch"><input type="checkbox" id="sc-enabled"><span></span></span></label>
       </div>
@@ -114,10 +115,10 @@
         <label class="f" style="margin-bottom:12px">Timeframe
           <span class="seg" id="sc-tf"></span></label>
         <div class="grid">
-          <label class="f">Min volume (USD, selected timeframe)<input name="min_volume" placeholder="e.g. 50k"></label>
+          <label class="f">Min volume (USD, selected timeframe)<input name="min_volume" placeholder="e.g. 70k"></label>
           <label class="f">Min market cap (USD, 0 = none)<input name="min_mcap" placeholder="e.g. 100k"></label>
           <label class="f">Max market cap (USD, 0 = none)<input name="max_mcap" placeholder="e.g. 50m"></label>
-          <label class="f">Min total fees (SOL, as on GMGN, 0 = off)<input name="min_fees_sol" placeholder="e.g. 20"></label>
+          <label class="f">Min total fees (SOL, 0 = off)<input name="min_fees_sol" placeholder="e.g. 20"></label>
           <label class="f">Cooldown per token (minutes)<input name="cooldown_minutes" placeholder="60"></label>
         </div>
         <div class="row" style="margin-top:14px"><span class="msg" id="sc-msg"></span>
@@ -215,7 +216,7 @@ document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
 /* ======================= render ======================= */
 function render() {
   // data-source health pills
-  for (const h of ["gmgn","jupiter","gecko","meteora"]) {
+  for (const h of ["gmgn","jupiter","gecko","meteora","metlex"]) {
     const st = (S.health || {})[h] || {}, el = $("#h-" + h), dot = el.querySelector(".dot");
     dot.className = "dot " + (st.healthy === true ? "ok" : st.healthy === false ? "bad" : "");
     el.title = st.error ? "Last error: " + st.error : "OK";

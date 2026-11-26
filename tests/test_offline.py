@@ -5,8 +5,6 @@ without internet. Run with:  pip install pytest && pytest -q
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -30,6 +28,7 @@ from app.modules import exit_alerts, scanner, token_alerts  # noqa: E402
 MINT_A = "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr"   # fake-but-valid base58 addresses
 MINT_B = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
 MINT_C = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
+MINT_D = "wxE5okdbtn3QRcgt9QcEM45T2EoPdvf3N8FM2Tnpump"   # only GMGN knows this one
 POOL_A = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"
 
 
@@ -69,9 +68,14 @@ class Market:
     """Fake Jupiter/Gecko/Meteora answering from in-memory dicts."""
 
     def __init__(self):
-        self.price = {SOL_MINT: 150.0, MINT_A: 0.002, MINT_B: 1.5, MINT_C: 0.01}
-        self.vol5m = {MINT_A: 80_000.0, MINT_B: 10_000.0, MINT_C: 200_000.0}
-        self.mcap = {MINT_A: 2_000_000.0, MINT_B: 30_000_000.0, MINT_C: 900_000_000.0}
+        self.price = {SOL_MINT: 150.0, MINT_A: 0.002, MINT_B: 1.5, MINT_C: 0.01, MINT_D: 0.0003}
+        self.vol5m = {MINT_A: 80_000.0, MINT_B: 10_000.0, MINT_C: 200_000.0, MINT_D: 0.0}
+        self.mcap = {MINT_A: 2_000_000.0, MINT_B: 30_000_000.0, MINT_C: 900_000_000.0, MINT_D: 300_000.0}
+        self.total_fee = {MINT_A: 62.5, MINT_B: 2.2, MINT_C: 115.3, MINT_D: 103.8}
+        self.gmgn_rank_mints = [MINT_A, MINT_B, MINT_C]
+        self.gmgn_down = False
+        self.metlex_up = False
+        self.metlex_lists_down = False
         self.candles: list[list[float]] = []
         self.jup_fail = False
         self.calls: list[str] = []
@@ -88,14 +92,29 @@ class Market:
     def handler(self, req: httpx.Request) -> httpx.Response:
         u = req.url
         self.calls.append(f"{u.host}{u.path}")
+        if u.host == "www.metlex.io" and u.path.startswith("/api/jupiter/api/tokens/v2/top"):
+            if self.metlex_lists_down:
+                return httpx.Response(503)
+            return httpx.Response(200, json=[self.tok(m) for m in (MINT_A, MINT_B, MINT_C, SOL_MINT)])
+        if u.host == "www.metlex.io":
+            if not self.metlex_up:
+                return httpx.Response(503)
+            m = u.params["address"]
+            return httpx.Response(200, json={"data": {"address": m, "total_fee": str(self.total_fee[m] + 1)}})
         if u.host == "openapi.gmgn.ai":
             assert req.headers.get("X-APIKEY") == "gk" and "timestamp" in u.params and "client_id" in u.params
             self.gmgn_params.append(dict(u.params))
+            if self.gmgn_down:
+                return httpx.Response(500, json={"code": 500, "error": "DOWN"})
+            if u.path == "/v1/token/info":
+                m = u.params["address"]
+                return httpx.Response(200, json={"code": 0, "data": {"code": 0, "data": {
+                    "address": m, "total_fee": str(self.total_fee[m]), "trade_fee": "1"}}})
             if u.path == "/v1/market/rank":
                 rank = [{"address": m, "symbol": m[:3].upper(), "name": f"Token {m[:3]}", "logo": "https://img/x.png",
                          "price": self.price[m], "market_cap": self.mcap[m], "volume": self.vol5m[m],
-                         "price_change_percent": 4.2, "gas_fee": fee}
-                        for m, fee in ((MINT_A, 62.5), (MINT_B, 2.2), (MINT_C, 115.3))]
+                         "price_change_percent": 4.2, "gas_fee": 1.0}
+                        for m in self.gmgn_rank_mints]
                 # real GMGN answers are double-wrapped (seen live on 2026-11-26)
                 return httpx.Response(200, json={"code": 0, "data": {"code": 0, "data": {"rank": rank}}})
             if u.path == "/v1/market/token_kline":
@@ -255,7 +274,7 @@ def test_scanner_cycle_jupiter_fallback(tmp_path):
     run(go())
 
 
-def test_scanner_jupiter_lists_with_gmgn_fees(tmp_path):
+def test_scanner_fees_per_token_from_gmgn(tmp_path):
     m = Market()
     m.vol5m[MINT_B] = 70_000.0
     m.mcap[MINT_C] = 40_000_000.0
@@ -270,28 +289,58 @@ def test_scanner_jupiter_lists_with_gmgn_fees(tmp_path):
         assert len(sent) == 2, sent
         assert "$EKP" in sent[0] and "$7GC" in sent[1]            # biggest volume first
         assert "Total fees: <b>62.5 SOL</b> (~$9.38K)" in sent[1]
-        assert any("api.jup.ag/tokens/v2/toptraded/5m" in c for c in m.calls)   # volume from Jupiter
-        assert all(p.get("interval") in ("5m", "1h", "24h") for p in m.gmgn_params)  # GMGN for fees only
-        assert not any("token_kline" in c for c in m.calls)
+        info_calls = [p for p in m.gmgn_params if "address" in p]
+        assert len(info_calls) == 3                                  # one fee lookup per remaining token
+        assert not [p for p in m.gmgn_params if "interval" in p]     # GMGN is NOT used to find tokens
+        assert not [c for c in m.calls if "geckoterminal" in c]       # neither is GeckoTerminal
     run(go())
 
 
-def test_scanner_alerts_even_if_gmgn_down(tmp_path):
+def test_scanner_completeness_check(tmp_path):
+    """Jupiter's top-100 list must reach below the threshold for full coverage."""
     m = Market()
 
     async def go():
-        ctx = await make_ctx(tmp_path, m, gmgn=True)
-        orig = m.handler
+        ctx = await make_ctx(tmp_path, m)
+        s = await ctx.db.scanner_settings()
+        s.update(min_volume=70_000, min_mcap=0, max_mcap=0)
+        _, _, info = await scanner.evaluate(ctx, s, time.time())
+        assert info["complete"] is True and info["sources"]["jupiter toptraded"] == 4
 
-        def broken(req):
-            if req.url.host == "openapi.gmgn.ai":
-                return httpx.Response(500, json={"code": 500, "error": "DOWN"})
-            return orig(req)
-        ctx.data.gmgn_client = httpx.AsyncClient(transport=httpx.MockTransport(broken))
+        def hundred(floor):
+            return [{"mint": f"M{i:03d}", "symbol": "X", "mcap": 1e6, "volume": {"5m": floor + i * 1000.0}}
+                    for i in range(100)]
+
+        async def fake(cat, tf, module, floor=60_000.0, prefer=None):
+            return hundred(floor)
+        ctx.data.jup_category = fake
+        _, info = await scanner.collect_candidates(ctx, s)
+        assert info["floor"] == 60_000 and info["complete"] is True      # list goes below 70K: everything covered
+
+        async def fake_hot(cat, tf, module, prefer=None):
+            return hundred(75_000.0)
+        ctx.data.jup_category = fake_hot
+        _, info = await scanner.collect_candidates(ctx, s)
+        assert info["complete"] is False                                   # extreme market: warns
+    run(go())
+
+
+def test_scanner_metlex_backup_and_na(tmp_path):
+    m = Market()
+    m.gmgn_down = True
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m, gmgn=True)
         await svc.update_scanner(ctx.db, {"enabled": True, "min_volume": "50k", "min_mcap": "1m",
                                           "max_mcap": "100m", "min_fees_sol": "20"})
-        await scanner.run_cycle(ctx)
+        await scanner.run_cycle(ctx)                     # GMGN and Metlex down -> alert with n/a
         assert len(ctx.notifier.sent) == 1 and "Total fees: n/a" in ctx.notifier.sent[0][0]
+        await ctx.db.conn.execute("DELETE FROM scanner_seen")
+        await ctx.db.conn.commit()
+        ctx.data.cache = type(ctx.data.cache)()
+        m.metlex_up = True
+        await scanner.run_cycle(ctx)                     # Metlex answers (63.5 SOL)
+        assert len(ctx.notifier.sent) == 2 and "63.5 SOL" in ctx.notifier.sent[1][0]
     run(go())
 
 
@@ -549,4 +598,39 @@ def test_live_candles_follow_price_between_syncs(tmp_path):
         df3, _ = await exit_alerts.live_candles(ctx, a, 4.0, b + 305)      # next candle, before re-sync
         assert len(df3) == n + 1 and df3["open"].iloc[-1] == 6.0 and df3["close"].iloc[-1] == 4.0
         assert sum("/ohlcv/" in c for c in m.calls) == 1                  # history downloaded once
+    run(go())
+
+
+def test_fees_come_from_metlex_first(tmp_path):
+    """Like the previous bot: Metlex total_fee first; GMGN only if Metlex doesn't answer."""
+    m = Market()
+    m.metlex_up = True
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m, gmgn=True)
+        await svc.update_scanner(ctx.db, {"enabled": True, "min_volume": "70k", "min_mcap": "1m",
+                                          "max_mcap": "100m", "min_fees_sol": "20"})
+        await scanner.run_cycle(ctx)
+        assert len(ctx.notifier.sent) == 1 and "63.5 SOL" in ctx.notifier.sent[0][0]   # Metlex value
+        assert not [p for p in m.gmgn_params if "address" in p]                         # no GMGN fee lookups
+    run(go())
+
+
+def test_scanner_lists_routes_and_fallback(tmp_path):
+    """toptrending via Metlex (like the old bot), toptraded via Jupiter; each falls back to the other."""
+    m = Market()
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m)
+        s = await ctx.db.scanner_settings()
+        await scanner.collect_candidates(ctx, s)
+        assert "www.metlex.io/api/jupiter/api/tokens/v2/toptrending/5m" in m.calls
+        assert "api.jup.ag/tokens/v2/toptraded/5m" in m.calls
+        assert scanner.INTERVAL_S == 10
+        ctx.data.cache = type(ctx.data.cache)()
+        m.calls.clear()
+        m.metlex_lists_down = True
+        cands, info = await scanner.collect_candidates(ctx, s)
+        assert "api.jup.ag/tokens/v2/toptrending/5m" in m.calls      # Metlex down -> Jupiter directly
+        assert info["sources"]["jupiter toptrending"] == 4 and len(cands) == 4
     run(go())

@@ -1,22 +1,25 @@
 """
 Module A — Global Volume Scanner (timeframes: 5m, 1h, 24h).
 
-Every minute:
-  1. Collect candidate tokens from Jupiter (top traded, top trending, recently
-     listed) and GeckoTerminal (trending + new pools, refreshed every 5 min).
-     Volume, price change and market cap come from Jupiter.
-  2. Drop SOL/USDC/USDT, blacklisted tokens and tokens still in cooldown.
-  3. Keep tokens whose market cap is inside your range and whose volume in the
-     chosen timeframe is above your threshold.
-  4. Total fees (SOL, the gmgn.ai "Total Fees" number) come from GMGN — the
-     ONLY thing GMGN is used for. Only asked when at least one token passed step 3.
+Every 10 seconds (like your previous bot):
+  1. Get Jupiter's lists for your timeframe: "top trending" (the list your previous
+     bot used, read through Metlex like before) and "top traded" (the 100 tokens with
+     the most volume, read directly from Jupiter). Each list falls back to the other
+     route if one doesn't answer. Volume, price change and
+     market cap all come from Jupiter.
+  2. Completeness check: if the 100th token of "top traded" has LESS volume than
+     your threshold, every token above your threshold is guaranteed to be in the
+     list. (If not, a warning is logged — that only happens in extreme markets.)
+  3. Drop SOL/USDC/USDT, blacklisted tokens and tokens still in cooldown, then
+     apply your market-cap range and volume threshold.
+  4. TOTAL FEES (SOL) for each remaining token, exactly like your previous bot:
+     Metlex `total_fee` first, GMGN as backup. If neither answers, the alert is
+     still sent with "Total fees: n/a".
   5. Send the alert and remember the time (cooldown).
-
-If GMGN is unavailable during a scan, alerts are still sent and show
-"Total fees: n/a" (the fees filter can't be checked that time).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -27,116 +30,106 @@ from ..datasources import BASE_TOKENS, SourceError
 log = logging.getLogger("zenobot.scanner")
 
 MODULE = "scanner"
-INTERVAL_S = 60            # how often a scan runs
-IDLE_S = 15                # how often to re-check when the module is OFF
+INTERVAL_S = 10            # how often a scan runs (same as your previous bot)
+IDLE_S = 10                # how often to re-check when the module is OFF
 MAX_ALERTS_PER_SCAN = 8    # safety cap so a market-wide pump can't flood you
+MAX_FEE_LOOKUPS = 20       # per scan, biggest volume first
 
 
-async def collect_candidates(ctx: Ctx, tf: str) -> dict[str, dict]:
-    """Jupiter lists + GeckoTerminal trending/new pools (enriched with Jupiter data)."""
+async def collect_candidates(ctx: Ctx, s: dict) -> tuple[dict[str, dict], dict]:
+    """Jupiter top traded + top trending. Returns (mint -> token info, info about the lists)."""
+    tf = s["timeframe"]
     cands: dict[str, dict] = {}
-    for cat in ("toptraded", "toptrending"):
+    info: dict = {"sources": {}, "floor": None, "complete": None}
+    # toptrending = exactly what your previous bot read (via Metlex first);
+    # toptraded = sorted by volume, used for the completeness guarantee (via Jupiter first)
+    for cat, prefer in (("toptraded", "jupiter"), ("toptrending", "metlex")):
         try:
-            for t in await ctx.data.jup_category(cat, tf, MODULE):
-                if t.get("mint"):
-                    cands.setdefault(t["mint"], t)
+            toks = await ctx.data.jup_category(cat, tf, MODULE, prefer=prefer)
         except SourceError as e:
-            log.info("Jupiter %s failed: %s", cat, e)
-    try:
-        for t in await ctx.data.jup_recent(MODULE):
+            log.warning("Jupiter %s failed: %s", cat, e)
+            continue
+        info["sources"][f"jupiter {cat}"] = len(toks)
+        for t in toks:
             if t.get("mint"):
                 cands.setdefault(t["mint"], t)
-    except SourceError as e:
-        log.info("Jupiter recent failed: %s", e)
-
-    extra: list[str] = []
-    for kind in ("trending_pools", "new_pools"):
-        try:
-            extra += await ctx.data.gecko_pool_list(kind, MODULE)
-        except SourceError as e:
-            log.info("Gecko %s failed: %s", kind, e)
-    extra = [m for m in dict.fromkeys(extra) if m not in cands]
-    if extra:
-        try:
-            cands.update(await ctx.data.jup_tokens(extra[:100], MODULE))
-        except SourceError as e:
-            log.info("Jupiter enrichment failed: %s", e)
-    return cands
+        if cat == "toptraded" and toks:
+            vols = [(t.get("volume") or {}).get(tf) or 0.0 for t in toks]
+            info["floor"] = min(vols)
+            # a list shorter than 100 already contains every traded token
+            info["complete"] = len(toks) < 100 or info["floor"] < s["min_volume"]
+    if info["complete"] is False:
+        log.warning("Jupiter's top-100 list ends at %.0f USD volume, above your threshold: "
+                    "a few tokens above the threshold may be missing this minute", info["floor"])
+    return cands, info
 
 
-async def gmgn_fee_map(ctx: Ctx, tf: str) -> dict[str, float] | None:
+async def evaluate(ctx: Ctx, s: dict, now: float) -> tuple[list[tuple[dict, float, float | None]],
+                                                        list[tuple[dict, float, str]], dict]:
     """
-    mint -> lifetime total fees in SOL, from GMGN's trending lists.
-    Returns None when GMGN couldn't be reached at all (or there's no key).
+    Run the full filter chain. Returns (to_alert, skipped_with_reason, info).
+    Used by the bot AND by `zenobot scan`, so the diagnostic shows exactly what the bot does.
     """
-    if not ctx.data.has_gmgn:
-        return None
-    fees: dict[str, float] = {}
-    reached = False
-    for iv in dict.fromkeys((tf, "1h", "24h")):
+    tf = s["timeframe"]
+    cands, list_info = await collect_candidates(ctx, s)
+    blacklist = set(await ctx.db.blacklist())
+    last = await ctx.db.scanner_all_last_alerted()
+    cooldown_s = float(s["cooldown_minutes"]) * 60
+
+    passed: list[tuple[dict, float, float | None]] = []
+    skipped: list[tuple[dict, float, str]] = []
+    for mint, t in cands.items():
+        if mint in BASE_TOKENS:
+            continue
+        vol = (t.get("volume") or {}).get(tf)
+        mcap = t.get("mcap")
+        why = []
+        if mint in blacklist:
+            why.append("blacklisted")
+        if cooldown_s and mint in last and now - last[mint] < cooldown_s:
+            why.append("cooldown")
+        if (s["min_mcap"] and (mcap is None or mcap < s["min_mcap"])) or \
+           (s["max_mcap"] and (mcap is None or mcap > s["max_mcap"])):
+            why.append("market cap out of range")
+        if vol is None or vol < s["min_volume"]:
+            why.append("volume too low")
+        if why:
+            skipped.append((t, vol or 0.0, ", ".join(why)))
+        else:
+            passed.append((dict(t), vol, (t.get("change") or {}).get(tf)))
+    passed.sort(key=lambda x: x[1], reverse=True)
+
+    # total fees, one lookup per remaining token (in parallel)
+    to_check = passed[:MAX_FEE_LOOKUPS]
+    results = await asyncio.gather(*(ctx.data.token_total_fees(t["mint"], MODULE) for t, _, _ in to_check))
+    sol_usd = None
+    if any(v is not None for v, _ in results):
         try:
-            for t in await ctx.data.gmgn_rank(iv, MODULE):
-                if t.get("fees_sol") is not None:
-                    fees[t["mint"]] = max(fees.get(t["mint"], 0.0), t["fees_sol"])
-            reached = True
-        except SourceError as e:
-            log.info("GMGN fees (%s) unavailable: %s", iv, e)
-    return fees if reached else None
+            sol_usd = await ctx.data.sol_usd(MODULE)
+        except SourceError:
+            pass
+    final: list[tuple[dict, float, float | None]] = []
+    for (t, vol, chg), (fees, src) in zip(to_check, results):
+        t["fees"] = None
+        t["fees_sol"] = fees
+        t["fees_src"] = src
+        if fees is not None and sol_usd:
+            t["fees"] = fees * sol_usd
+        if s["min_fees_sol"] and fees is not None and fees < s["min_fees_sol"]:
+            skipped.append((t, vol, f"fees too low ({fees:.1f} SOL)"))
+            continue
+        final.append((t, vol, chg))  # fees unknown (no source answered) -> still alerted, shows n/a
+    info = {"candidates": len(cands), "sol_usd": sol_usd, **list_info}
+    return final, skipped, info
 
 
 async def run_cycle(ctx: Ctx) -> float:
     s = await ctx.db.scanner_settings()
     if not s["enabled"]:
         return IDLE_S
-
-    tf = s["timeframe"]
     now = time.time()
-    cands = await collect_candidates(ctx, tf)
-    blacklist = set(await ctx.db.blacklist())
-    last = await ctx.db.scanner_all_last_alerted()
-    cooldown_s = float(s["cooldown_minutes"]) * 60
-
-    passed: list[tuple[dict, float, float | None]] = []
-    for mint, t in cands.items():
-        if mint in BASE_TOKENS or mint in blacklist:
-            continue
-        if cooldown_s and mint in last and now - last[mint] < cooldown_s:
-            continue
-        mcap = t.get("mcap")
-        if s["min_mcap"] and (mcap is None or mcap < s["min_mcap"]):
-            continue
-        if s["max_mcap"] and (mcap is None or mcap > s["max_mcap"]):
-            continue
-        vol = (t.get("volume") or {}).get(tf)
-        if vol is None or vol < s["min_volume"]:
-            continue
-        passed.append((dict(t), vol, (t.get("change") or {}).get(tf)))
-
-    if not passed:
-        await ctx.db.scanner_prune()
-        return INTERVAL_S
-
-    # --- total fees from GMGN (only for tokens that passed everything else)
-    fee_map = await gmgn_fee_map(ctx, tf)
-    sol_usd = None
-    if fee_map:
-        try:
-            sol_usd = await ctx.data.sol_usd(MODULE)
-        except SourceError:
-            pass
-    final: list[tuple[dict, float, float | None]] = []
-    for t, vol, chg in passed:
-        t["fees"] = None  # don't show Jupiter's own fee figure
-        if fee_map is not None:
-            t["fees_sol"] = fee_map.get(t["mint"])
-            if t["fees_sol"] is not None and sol_usd:
-                t["fees"] = t["fees_sol"] * sol_usd
-            # GMGN answered: a token it doesn't list, or with fees below your minimum, is skipped
-            if s["min_fees_sol"] and (t["fees_sol"] is None or t["fees_sol"] < s["min_fees_sol"]):
-                continue
-        final.append((t, vol, chg))
-
-    final.sort(key=lambda x: x[1], reverse=True)  # biggest volume first
+    final, _, info = await evaluate(ctx, s, now)
+    tf = s["timeframe"]
     sent = 0
     for t, vol, chg in final[:MAX_ALERTS_PER_SCAN]:
         if await ctx.notifier.send(fmt.scanner_alert(t, tf, vol, chg)):
@@ -144,6 +137,6 @@ async def run_cycle(ctx: Ctx) -> float:
             await ctx.db.scanner_mark(t["mint"], now)
             await ctx.db.add_event("scanner", f"${t.get('symbol')} — volume {tf} {fmt.usd(vol)}, MC {fmt.usd(t.get('mcap'))}")
     if sent:
-        log.info("scanner: %d alert(s) sent from %d candidates", sent, len(cands))
+        log.info("scanner: %d alert(s) sent from %d candidates", sent, info["candidates"])
     await ctx.db.scanner_prune()
     return INTERVAL_S

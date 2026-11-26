@@ -24,10 +24,10 @@ import aiosqlite
 DEFAULT_SCANNER: dict[str, Any] = {
     "enabled": False,          # Module A starts switched OFF
     "timeframe": "5m",         # 5m | 1h | 24h
-    "min_volume": 50_000,      # USD volume in the selected timeframe
+    "min_volume": 70_000,      # USD volume in the selected timeframe
     "min_mcap": 100_000,       # USD, 0 = no minimum
     "max_mcap": 50_000_000,    # USD, 0 = no maximum
-    "min_fees_sol": 0,         # GMGN "Total Fees" in SOL (lifetime), 0 = don't filter
+    "min_fees_sol": 0,         # lifetime "Total Fees" in SOL (Metlex/GMGN), 0 = don't filter
     "cooldown_minutes": 60,    # don't alert the same token again for this long
 }
 

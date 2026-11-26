@@ -4,7 +4,7 @@ A 24/7 alert bot for Solana tokens and Meteora DLMM positions. You control it fr
 
 | Module | What it does |
 |---|---|
-| 📡 **A: Global Volume Scanner** | Scans trending and new Solana tokens every minute using Jupiter and GeckoTerminal. Alerts when volume (5m / 1h / 24h), market cap range and total fees (in SOL, from GMGN) match your filters. Has a cooldown per token and a blacklist. |
+| 📡 **A: Global Volume Scanner** | Every 10 seconds it checks Jupiter's top-trending list (exactly like your previous bot) plus the top-traded list for your timeframe, with a built-in check that no token above your threshold is missed. Alerts when volume (5m / 1h / 24h), market cap range and total fees (SOL, checked for each token) match your filters. Has a cooldown per token and a blacklist. |
 | 🎯 **B: Token Alerts** | Watches specific tokens for a Volume, Price (USD or SOL) or Market-cap threshold. Sends **"Special Alert Hit!"** when it is reached. |
 | 🚪 **C: Exit Alerts** | Watches RSI and/or Bollinger Bands on a **live** (still-open) candle every 10 seconds: 1m / 5m / 15m / 1h / 4h. The history comes from GeckoTerminal and the live candle is built from Jupiter prices. Alerts instantly, then reminds you every 5 minutes while the condition holds. Turns itself off after the duration you choose. |
 
@@ -78,13 +78,18 @@ The suggested address looks like `https://203-0-113-7.sslip.io`. It's a free add
 The first build takes about 5 minutes. Then you get **"✅ zenobot_alerts is online"** on Telegram.
 
 ### GMGN API key (recommended)
-The GMGN key is used **only for total fees** in the volume scanner (the "Total Fees" number on gmgn.ai, in SOL). Everything else comes from Jupiter and GeckoTerminal. A read-only key is enough, with trading disabled.
+The GMGN key is used for one thing only: a **backup** for each token's total fees, used when Metlex doesn't answer.
+
+Volume, prices and candles come from Jupiter and GeckoTerminal. A read-only key is enough, with trading disabled.
 1. Create the key at **gmgn.ai/ai**.
 2. If your key has an **IP whitelist**, add your server's IP (run `zenobot ip` on the server to see it).
 3. To add or change the key later, run `zenobot edit` and fill in `GMGN_API_KEY=`.
 4. Check it works with `zenobot test`.
 
-Without a key, or when GMGN doesn't answer, everything still works. Alerts then show "Total fees: n/a", and the fees filter can't be applied.
+Without a key, or when GMGN doesn't answer, everything still works:
+- the scanner works the same (it finds tokens with Jupiter)
+- fees still come from **Metlex**
+- if Metlex doesn't answer either, the alert shows "Total fees: n/a" and is still sent
 
 ### Step 7: Open the dashboard
 Open the address the installer printed. Log in with username **`admin`** and your password. Send `/dashboard` to the bot at any time to get the link again, and run `zenobot password` on the server to see the password.
@@ -123,8 +128,7 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 | `zenobot logs` | live logs (Ctrl+C to exit) |
 | `zenobot edit` | change token, chat id or password (save with Ctrl+O, Enter, Ctrl+X) |
 | `zenobot password` | show the dashboard password |
-| `zenobot test` | check the data sources (GMGN, Jupiter, GeckoTerminal) |
-| `zenobot fees` | show GMGN total fees (SOL) for 5 trending tokens |
+| `zenobot test` | check the data sources (Jupiter, GeckoTerminal, Metlex, GMGN) |
 | `zenobot scan` | run one scan without sending alerts and explain why tokens pass or are skipped |
 | `zenobot ip` | show the server's IP (for the GMGN whitelist) |
 | `zenobot status` | check it's running |
@@ -156,14 +160,16 @@ It downloads the new files from GitHub, rebuilds and restarts the bot. Your aler
 
 | Need | Source | Notes |
 |---|---|---|
-| Scanner lists, 5m/1h/24h volume, market cap | Jupiter Tokens API V2, plus GeckoTerminal trending/new pools | Batches of up to 100 tokens per request. |
-| **Total fees** (SOL) | **GMGN OpenAPI** | The only thing GMGN is used for. Asked only when a token has passed every other filter. |
+| Finding tokens + volume, market cap, % change | Jupiter Tokens V2, every 10 s: **top trending** (read through Metlex, the same URL as your previous bot) and **top traded** (read directly from Jupiter), 100 tokens each | If one route fails, the list is read through the other. Splitting the two lists keeps each route at 6 calls/min, far below the limits (Jupiter free key: 60/min). Every scan checks that the list is complete (see "Coverage" below). |
+| 5m/1h/24h volume, price change, market cap | Jupiter Tokens API V2 | The same source for every token, so all alerts are comparable. |
+| **Total fees** (SOL) | **Metlex** `total_fee`, the same as your previous bot, with **GMGN** as backup | Looked up for each token that passed the other filters, up to 20 per scan. Cached for 3 minutes. |
 | Live price, 24h change | Jupiter Price API V3 | One batched request every 10 seconds for all exit alerts. Falls back to GeckoTerminal. |
 | Candle history for RSI/BB | GeckoTerminal, then Meteora DLMM | Refreshed every 5 minutes per alert, so 15 exit alerts use about 3 GeckoTerminal calls/min. The live candle is built from Jupiter prices. |
 
-- **Rate limiting:** each API has its own token bucket, and each alert module has a budget of 15 calls/min to Jupiter and GeckoTerminal. GMGN's bucket counts a trending request as 3 units (`GMGN_RPS`, default 2 units/s). After an HTTP 429 the bot pauses that API automatically.
+- **Rate limiting:** each API has its own token bucket, and each alert module has a budget of 15 calls/min to Jupiter and GeckoTerminal. GMGN is only called for fee backups (`GMGN_RPS`, default 2/s). After an HTTP 429 the bot pauses that API automatically.
 - **Why no GeckoTerminal API key?** It isn't needed: building the live candle from Jupiter prices keeps GeckoTerminal usage low.
-- **Total fees** come from GMGN's trending list, field `gas_fee`. It holds the token's **lifetime total fees in SOL**, the "Total Fees" number on gmgn.ai; this was checked live with `zenobot fees`. Set the scanner minimum **in SOL**. Alerts show SOL plus the approximate dollar value. GMGN lists its top 100 tokens for 5m, 1h and 24h. When a fee minimum is set, a token that is in none of those lists is skipped, since its fees can't be checked.
+- **Total fees** come from Metlex's token info, field `total_fee`, exactly as in your previous bot, with GMGN as backup. It works for **any** token. Set the scanner minimum **in SOL**. Alerts show SOL plus the approximate dollar value.
+- **Coverage:** Jupiter's "top traded" list is the 100 tokens with the most volume in your timeframe, measured across all Solana DEXes that Jupiter routes through (Meteora, Raydium, Orca, Pump.fun AMM and more). If the 100th token is below your threshold, then **every** token above your threshold is in the list, so nothing is missed. The bot checks this on every scan, and `zenobot scan` prints it. With a $70K/5m threshold the list practically always reaches below it; in an extremely hot market where 100+ tokens are above $70K at once, the log shows a warning.
 - **1m volume** was removed from the scanner, which now offers only 5m / 1h / 24h.
 
 

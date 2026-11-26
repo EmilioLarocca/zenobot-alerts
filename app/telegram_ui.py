@@ -90,7 +90,7 @@ async def render_main(db: Database, public_url: str | None = None) -> Screen:
 
 def scanner_summary(s: dict) -> str:
     max_mc = fmt.usd(s["max_mcap"], 0) if s["max_mcap"] else "no max"
-    fees = f"≥ {fmt.number(s['min_fees_sol'])} SOL (GMGN)" if s["min_fees_sol"] else "off"
+    fees = f"≥ {fmt.number(s['min_fees_sol'])} SOL" if s["min_fees_sol"] else "off"
     return (
         f"Timeframe: <b>{s['timeframe']}</b>\n"
         f"Min volume: <b>{fmt.usd(s['min_volume'], 0)}</b>\n"
@@ -465,8 +465,7 @@ SCANNER_PROMPTS = {
     "min_volume": "Send the minimum <b>volume in USD</b> for the selected timeframe.\nExamples: <code>50000</code> · <code>50k</code> · <code>1.2m</code>",
     "min_mcap": "Send the <b>minimum market cap</b> in USD (0 = no minimum).\nExamples: <code>100k</code> · <code>1m</code>",
     "max_mcap": "Send the <b>maximum market cap</b> in USD (0 = no maximum).\nExamples: <code>10m</code> · <code>500k</code>",
-    "min_fees_sol": "Send the <b>minimum total fees in SOL</b>, the \"Total Fees\" number on gmgn.ai "
-                    "(0 = don't filter). Example: <code>20</code>",
+    "min_fees_sol": "Send the <b>minimum total fees in SOL</b> (0 = don't filter). Example: <code>20</code>",
     "cooldown_minutes": "Send the <b>cooldown in minutes</b> (how long before the same token can alert again).\nExample: <code>60</code>",
 }
 EXIT_PROMPTS = {
