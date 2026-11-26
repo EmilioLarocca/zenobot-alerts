@@ -13,9 +13,8 @@ Recommended:
                          the bot invents one and sends it to you on Telegram.
 
 Optional (sensible defaults are used when missing):
-    GMGN_API_KEY         your GMGN OpenAPI key (https://gmgn.ai/ai). Strongly recommended:
-                         it powers the volume scanner (incl. total fees) and real-time
-                         candles for exit alerts. A read-only key (trading disabled) is enough.
+    GMGN_API_KEY         your GMGN OpenAPI key (https://gmgn.ai/ai), used ONLY for the
+                         scanner's "Total Fees" (SOL). A read-only key (trading disabled) is enough.
     GMGN_RPS             GMGN rate-limit units per second (default 2, safe for the free plan)
     JUPITER_API_KEY      free key from https://portal.jup.ag (doubles Jupiter speed)
     GECKO_RPM            GeckoTerminal calls per minute (default 8, keyless limit is ~5-10)

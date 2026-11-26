@@ -255,9 +255,10 @@ def test_scanner_cycle_jupiter_fallback(tmp_path):
     run(go())
 
 
-def test_scanner_gmgn_with_total_fees(tmp_path):
+def test_scanner_jupiter_lists_with_gmgn_fees(tmp_path):
     m = Market()
     m.vol5m[MINT_B] = 70_000.0
+    m.mcap[MINT_C] = 40_000_000.0
 
     async def go():
         ctx = await make_ctx(tmp_path, m, gmgn=True)
@@ -265,11 +266,32 @@ def test_scanner_gmgn_with_total_fees(tmp_path):
                                           "min_mcap": "1m", "max_mcap": "100m", "min_fees_sol": "20"})
         await scanner.run_cycle(ctx)
         sent = [t for t, _ in ctx.notifier.sent]
-        # A passes (62.5 SOL fees); B fails fees (2.2 SOL); C fails max market cap
-        assert len(sent) == 1 and "$7GC" in sent[0], sent
-        assert "Total fees: <b>62.5 SOL</b> (~$9.38K)" in sent[0]   # 62.5 x $150 SOL
-        p = m.gmgn_params[0]
-        assert p["interval"] == "5m" and p["min_gas_fee"] == "20.0" and p["max_marketcap"] == "100000000.0"
+        # A (62.5 SOL) and C (115.3 SOL) pass; B fails fees (2.2 SOL)
+        assert len(sent) == 2, sent
+        assert "$EKP" in sent[0] and "$7GC" in sent[1]            # biggest volume first
+        assert "Total fees: <b>62.5 SOL</b> (~$9.38K)" in sent[1]
+        assert any("api.jup.ag/tokens/v2/toptraded/5m" in c for c in m.calls)   # volume from Jupiter
+        assert all(p.get("interval") in ("5m", "1h", "24h") for p in m.gmgn_params)  # GMGN for fees only
+        assert not any("token_kline" in c for c in m.calls)
+    run(go())
+
+
+def test_scanner_alerts_even_if_gmgn_down(tmp_path):
+    m = Market()
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m, gmgn=True)
+        orig = m.handler
+
+        def broken(req):
+            if req.url.host == "openapi.gmgn.ai":
+                return httpx.Response(500, json={"code": 500, "error": "DOWN"})
+            return orig(req)
+        ctx.data.gmgn_client = httpx.AsyncClient(transport=httpx.MockTransport(broken))
+        await svc.update_scanner(ctx.db, {"enabled": True, "min_volume": "50k", "min_mcap": "1m",
+                                          "max_mcap": "100m", "min_fees_sol": "20"})
+        await scanner.run_cycle(ctx)
+        assert len(ctx.notifier.sent) == 1 and "Total fees: n/a" in ctx.notifier.sent[0][0]
     run(go())
 
 
@@ -355,9 +377,11 @@ def test_exit_alert_fires_instantly_then_reminds(tmp_path):
         text, photo = ctx.notifier.sent[0]
         assert "Exit Position Alert" in text and "RSI(14)" in text and "Reminder every 5 min" in text
         assert photo and photo.endswith(".png")
-        assert any("openapi.gmgn.ai/v1/market/token_kline" in c for c in m.calls)  # GMGN candles used
-        await exit_alerts.run_cycle(ctx)                       # within 5 min -> silent
-        assert len(ctx.notifier.sent) == 1
+        assert not any("gmgn" in c for c in m.calls)                      # GMGN not used for candles
+        ohlcv_calls = sum("/ohlcv/" in c for c in m.calls)
+        await exit_alerts.run_cycle(ctx)                                 # live tick: no new download
+        assert sum("/ohlcv/" in c for c in m.calls) == ohlcv_calls
+        assert len(ctx.notifier.sent) == 1                     # within 5 min -> silent
         await ctx.db.update("exit_alerts", aid, {"last_triggered": time.time() - 301})
         await exit_alerts.run_cycle(ctx)                       # 5 min later, still true -> reminder
         assert len(ctx.notifier.sent) == 2 and "reminder" in ctx.notifier.sent[1][0]
@@ -505,4 +529,24 @@ def test_telegram_screens_and_flows(tmp_path):
         bad.effective_user.id = 999
         await ui.on_button(bad, context)
         bad.callback_query.answer.assert_awaited_with("⛔ Private bot", show_alert=True)
+    run(go())
+
+
+def test_live_candles_follow_price_between_syncs(tmp_path):
+    """The running candle is updated from live prices and new candles start on time."""
+    m = Market()
+    m.candles = rising_candles(n=100)
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m)
+        aid = await svc.create_exit_alert(ctx.db, ctx.data, {"ca": MINT_A, "timeframe": "5m", "rsi_min": 99})
+        a = await ctx.db.get("exit_alerts", aid)
+        b = int(time.time()) // 300 * 300                                   # start of the current 5m candle
+        df1, _ = await exit_alerts.live_candles(ctx, a, 5.0, b + 10)
+        n = len(df1)
+        df2, _ = await exit_alerts.live_candles(ctx, a, 6.0, b + 20)       # same candle -> updated
+        assert len(df2) == n and df2["close"].iloc[-1] == 6.0 and df2["high"].iloc[-1] >= 6.0
+        df3, _ = await exit_alerts.live_candles(ctx, a, 4.0, b + 305)      # next candle, before re-sync
+        assert len(df3) == n + 1 and df3["open"].iloc[-1] == 6.0 and df3["close"].iloc[-1] == 4.0
+        assert sum("/ohlcv/" in c for c in m.calls) == 1                  # history downloaded once
     run(go())

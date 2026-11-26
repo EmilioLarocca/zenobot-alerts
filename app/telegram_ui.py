@@ -337,7 +337,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         icon = {True: "🟢", False: "🔴", None: "⚪"}[st["healthy"]]
         err = f" — last error: {fmt.esc(st['error'])}" if st["error"] else ""
         lines.append(f"{icon} {host}{err}")
-    lines.append(f"\nGMGN API key: {'yes ✅' if cfg.gmgn_api_key else 'no ⚠️ (scanner fees + fast candles off)'}")
+    lines.append(f"\nGMGN API key (total fees only): {'yes ✅' if cfg.gmgn_api_key else 'no ⚠️ (fees filter off)'}")
     lines.append(f"Jupiter API key: {'yes' if cfg.jupiter_api_key else 'no (keyless, slower)'}")
     lines.append(f"Database on persistent volume: {'yes ✅' if cfg.volume_persistent else 'NO ⚠️'}")
     await update.effective_chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)

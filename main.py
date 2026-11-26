@@ -102,8 +102,8 @@ async def main() -> None:
             hello += (f"\n🔑 Dashboard login → user <code>admin</code>, password <tg-spoiler>{password}</tg-spoiler>"
                       "\n(set DASHBOARD_PASSWORD in Railway to choose your own)")
         if not cfg.gmgn_api_key:
-            hello += ("\nℹ️ No GMGN_API_KEY set: scanner fees filter is off and exit alerts use the slower "
-                      "GeckoTerminal candles. Add the key with <code>zenobot edit</code>.")
+            hello += ("\nℹ️ No GMGN_API_KEY set: total fees aren't available, so the scanner's fees filter is off. "
+                      "Add the key with <code>zenobot edit</code>.")
         if not cfg.volume_persistent:
             hello += "\n⚠️ No persistent volume: settings will reset on every deploy. Attach a Railway Volume at /data."
         await notifier.send(hello)

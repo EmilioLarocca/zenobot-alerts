@@ -3,10 +3,12 @@ Module C — Exit Position Alert (RSI / Bollinger Bands on LIVE candles).
 
 Every 10 seconds, for each active exit alert:
   1. Get the live USD price (Jupiter, one batched request for all alerts).
-  2. Get OHLCV candles: GMGN (real-time, needs GMGN_API_KEY), otherwise
-     GeckoTerminal, otherwise Meteora DLMM (5m/1h/4h only).
-  3. Put the live price into the current unfinished candle and compute
-     RSI / Bollinger Bands with pandas-ta.
+  2. Candles are built LOCALLY: the history is downloaded from GeckoTerminal
+     (fallback Meteora DLMM, 5m/1h/4h) when the alert starts and re-synced every
+     RESYNC_MINUTES; between syncs every 10-second live price updates the running
+     candle (open/high/low/close) and starts new candles on time. This keeps the
+     indicators real-time while using only ~3 GeckoTerminal calls/minute for 15 alerts.
+  3. Compute RSI / Bollinger Bands with pandas-ta on those live candles.
   4. If the condition is met -> alert immediately. While it stays met, a
      reminder is sent every REMINDER_MINUTES (default 5). Auto-expires at the end.
 
@@ -19,6 +21,8 @@ import asyncio
 import logging
 import time
 
+import pandas as pd
+
 from .. import formatting as fmt
 from ..context import Ctx
 from ..datasources import TF_SECONDS, SourceError
@@ -30,6 +34,15 @@ MODULE = "exit"
 INTERVAL_S = 10           # how often every exit alert is re-checked
 IDLE_S = 10
 REMINDER_MINUTES = 5      # while the condition holds, remind at most this often
+RESYNC_MINUTES = 5        # re-download candle history from GeckoTerminal this often
+MAX_CANDLES = 1000        # keep at most this many candles in memory per alert
+
+
+def _store(ctx: Ctx) -> dict:
+    """In-memory candle store shared by all alerts: (mint, timeframe) -> entry."""
+    if not hasattr(ctx.data, "_live_candles"):
+        ctx.data._live_candles = {}
+    return ctx.data._live_candles
 
 
 def candles_needed(a: dict) -> int:
@@ -56,20 +69,46 @@ async def expire_old(ctx: Ctx, alerts: list[dict], now: float) -> list[dict]:
     return alive
 
 
-async def check_alert(ctx: Ctx, a: dict, live_price: float | None, now: float) -> None:
+async def live_candles(ctx: Ctx, a: dict, live_price: float | None, now: float):
+    """Return (candles DataFrame, notes) with the live price applied to the running candle."""
     tf = a["timeframe"]
-    need = candles_needed(a)
-    # plenty of history so RSI matches charting sites (Wilder smoothing needs warm-up)
-    limit = min(1000, max(need * 4, 150))
-
-    cs = await ctx.data.candles(a["ca"], tf, limit, MODULE)
-    df = cs.df
+    tf_s = TF_SECONDS[tf]
+    key = (a["ca"], tf)
+    store = _store(ctx)
+    entry = store.get(key)
+    if entry is None or now - entry["synced"] >= RESYNC_MINUTES * 60:
+        limit = min(MAX_CANDLES, max(candles_needed(a) * 4, 150))
+        try:
+            cs = await ctx.data.candles(a["ca"], tf, limit, MODULE)
+            df = cs.df
+            if cs.relative and live_price:
+                df = rescale_to_price(df, live_price)
+            if entry is not None and len(entry["df"]) and len(df):
+                # keep the candle we built from live prices if it is newer than the download
+                newer = entry["df"][entry["df"]["ts"] > int(df["ts"].iloc[-1])]
+                if len(newer):
+                    df = pd.concat([df, newer], ignore_index=True)
+            entry = {"df": df, "synced": now, "notes": cs.notes}
+            store[key] = entry
+        except SourceError as e:
+            if entry is None:
+                raise SourceError(f"waiting for candle history ({e})")
+            entry["synced"] = now - RESYNC_MINUTES * 60 + 60  # retry the sync in a minute
+            log.info("resync failed for %s %s, continuing on live candles: %s", a["ca"], tf, e)
+    df = entry["df"]
     if df.empty:
         raise SourceError("no candles returned")
     if live_price:
-        if cs.relative:
-            df = rescale_to_price(df, live_price)
-        df = merge_live_price(df, live_price, TF_SECONDS[tf], now)
+        df = merge_live_price(df, live_price, tf_s, now)
+        if len(df) > MAX_CANDLES:
+            df = df.iloc[-MAX_CANDLES:].reset_index(drop=True)
+        entry["df"] = df
+    return df, entry.get("notes") or []
+
+
+async def check_alert(ctx: Ctx, a: dict, live_price: float | None, now: float) -> None:
+    need = candles_needed(a)
+    df, notes = await live_candles(ctx, a, live_price, now)
     if len(df) < need:
         raise SourceError(f"only {len(df)} candles exist so far, the indicator needs {need}")
 
@@ -81,13 +120,13 @@ async def check_alert(ctx: Ctx, a: dict, live_price: float | None, now: float) -
     if res["triggered"]:
         last = a.get("last_triggered")
         if not last or now - float(last) >= REMINDER_MINUTES * 60:
-            await fire(ctx, a, res, cs, now, fields, reminder=bool(last and a.get("armed") == 0))
+            await fire(ctx, a, res, notes, now, fields, reminder=bool(last and a.get("armed") == 0))
     else:
         fields["armed"] = 1  # condition cleared: the next hit is a fresh alert, not a reminder
     await ctx.db.update("exit_alerts", a["id"], fields)
 
 
-async def fire(ctx: Ctx, a: dict, res: dict, cs, now: float, fields: dict, reminder: bool) -> None:
+async def fire(ctx: Ctx, a: dict, res: dict, notes: list, now: float, fields: dict, reminder: bool) -> None:
     tok = None
     try:
         tok = await ctx.data.token_info(a["ca"], MODULE)
@@ -99,7 +138,7 @@ async def fire(ctx: Ctx, a: dict, res: dict, cs, now: float, fields: dict, remin
         pool = (bp or {}).get("meteora")
     except SourceError:
         pass
-    text = fmt.exit_alert(a, res, tok, "; ".join(cs.notes), pool, reminder=reminder)
+    text = fmt.exit_alert(a, res, tok, "; ".join(notes), pool, reminder=reminder)
     text += f"\n🔔 Reminder every {REMINDER_MINUTES} min while the condition holds."
     if await ctx.notifier.send(text, photo=(tok or {}).get("icon")):
         fields.update(armed=0, last_triggered=now)
@@ -121,6 +160,11 @@ async def run_cycle(ctx: Ctx) -> float:
     if not alerts:
         return IDLE_S
     prices = await ctx.data.prices_usd(list(dict.fromkeys(a["ca"] for a in alerts)), MODULE)
+    # forget candles of alerts that are no longer active
+    active = {(a["ca"], a["timeframe"]) for a in alerts}
+    store = _store(ctx)
+    for k in [k for k in store if k not in active]:
+        store.pop(k, None)
 
     async def one(a: dict) -> None:
         try:

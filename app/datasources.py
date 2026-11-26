@@ -2,9 +2,8 @@
 datasources.py — everything that talks to the outside world (market data).
 
 Sources and what each one is used for:
-  * GMGN (openapi.gmgn.ai)              volume scanner (trending + total fees) and
-                                         real-time OHLCV candles for exit alerts
-                                         (needs GMGN_API_KEY; read-only key is enough)
+  * GMGN (openapi.gmgn.ai)              ONLY the "Total Fees" number (in SOL) for the
+                                         volume scanner (needs GMGN_API_KEY, read-only is enough)
   * Jupiter  (api.jup.ag)               live USD prices, market cap, 5m/1h/24h volume,
                                          price change, fees, logo, trending lists
   * GeckoTerminal (api.geckoterminal.com) OHLCV candles for RSI/Bollinger, 1-minute volume,
@@ -49,9 +48,7 @@ TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
 GECKO_TF = {"1m": ("minute", 1), "5m": ("minute", 5), "15m": ("minute", 15), "1h": ("hour", 1), "4h": ("hour", 4)}
 METEORA_TF = {"5m": "5m", "1h": "1h", "4h": "4h"}  # Meteora has no 1m / 15m candles
 OHLCV_TTL = {"1m": 30, "5m": 45, "15m": 60, "1h": 90, "4h": 120}  # GeckoTerminal cache seconds
-# GMGN candles are refreshed often; the live Jupiter price updates the running candle in between
-GMGN_KLINE_TTL = {"1m": 15, "5m": 30, "15m": 45, "1h": 60, "4h": 60}
-GMGN_ROUTE_WEIGHT = {"rank": 3, "kline": 2}  # rate-limit cost of each GMGN route
+GMGN_ROUTE_WEIGHT = {"rank": 3}  # rate-limit cost of each GMGN route
 
 
 class SourceError(Exception):
@@ -319,38 +316,8 @@ class DataHub:
         data = await self._gmgn("/v1/market/rank", params, "rank", module)
         items = (data or {}).get("rank") if isinstance(data, dict) else data
         toks = [normalize_gmgn_rank(i, interval) for i in (items or []) if isinstance(i, dict) and i.get("address")]
-        self.cache.set(key, toks, 30)
+        self.cache.set(key, toks, 60)
         return toks
-
-    async def gmgn_kline(self, mint: str, tf: str, periods: int, module: str) -> pd.DataFrame:
-        """USD candles from GMGN (oldest -> newest), including the running candle."""
-        key = ("gkline", mint, tf, periods)
-        hit = self.cache.get(key)
-        if not self.cache.is_miss(hit):
-            return hit
-        now = int(time.time())
-        params = {"chain": "sol", "address": mint, "resolution": tf,
-                  # the official GMGN client sends from/to in milliseconds
-                  "from": (now - TF_SECONDS[tf] * (periods + 2)) * 1000, "to": now * 1000}
-        data = await self._gmgn("/v1/market/token_kline", params, "kline", module)
-        rows = (data or {}).get("list") if isinstance(data, dict) else data
-        recs = []
-        for c in rows or []:
-            t = _f(c.get("time"))
-            if t is None:
-                continue
-            if t > 1e12:  # milliseconds -> seconds
-                t /= 1000
-            o, h, l, cl = (_f(c.get(k)) for k in ("open", "high", "low", "close"))
-            if None in (o, h, l, cl):
-                continue
-            recs.append({"ts": int(t), "open": o, "high": h, "low": l, "close": cl,
-                         "volume": _f(c.get("amount")) or 0.0})  # amount = USD volume
-        df = pd.DataFrame(recs, columns=["ts", "open", "high", "low", "close", "volume"])
-        if len(df):
-            df = df.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
-        self.cache.set(key, df, GMGN_KLINE_TTL.get(tf, 20))
-        return df
 
     # ================================================================ JUPITER
     async def jup_prices(self, mints: list[str], module: str) -> dict[str, dict]:
@@ -590,18 +557,10 @@ class DataHub:
 
     async def candles(self, mint: str, tf: str, limit: int, module: str) -> CandleSet:
         """
-        OHLCV candles in USD for RSI/Bollinger. GMGN first (real-time, needs a key),
-        then GeckoTerminal, then Meteora DLMM (only 5m/1h/4h). Raises SourceError when nothing works.
+        OHLCV candle history in USD for RSI/Bollinger. GeckoTerminal first, Meteora
+        DLMM as fallback (only 5m/1h/4h). Raises SourceError when nothing works.
         """
-        errors = []
-        if self.has_gmgn:
-            try:
-                df = await self.gmgn_kline(mint, tf, limit, module)
-                if len(df):
-                    return CandleSet(df=df, source="gmgn", pool="", fetched_at=time.time())
-                errors.append("GMGN returned no candles")
-            except SourceError as e:
-                errors.append(str(e))
+        errors: list[str] = []
         pools = await self.best_pool(mint, module)
         if not pools:
             raise SourceError("; ".join(errors + ["no liquidity pool found for this token"]))
