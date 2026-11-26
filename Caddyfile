@@ -1,0 +1,6 @@
+# Caddy gets a free HTTPS certificate (Let's Encrypt) for your dashboard address
+# and forwards visitors to the bot. DOMAIN comes from the .env file.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy bot:8080
+}

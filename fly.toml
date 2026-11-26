@@ -1,0 +1,38 @@
+# fly.toml: settings for hosting zenobot_alerts on Fly.io.
+# Fly reads this file automatically when you launch the app from its dashboard.
+# You normally don't need to touch it.
+
+app = "zenobot-alerts"          # Fly may suggest a different unique name at launch; that's fine
+primary_region = "fra"          # Frankfurt, close to Italy
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  DATA_DIR = "/data"            # the database lives on the persistent volume below
+
+# Persistent disk (1 GB, about $0.15/month) so your settings survive every update
+[[mounts]]
+  source = "zenobot_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"    # must stay ON 24/7: the bot listens to Telegram and scans markets
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "90s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+# Smallest machine that comfortably fits the bot (it uses ~200 MB)
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

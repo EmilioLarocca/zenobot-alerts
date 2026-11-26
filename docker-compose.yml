@@ -1,0 +1,44 @@
+# docker-compose.yml: runs zenobot_alerts on any Ubuntu VPS.
+# The installer (install.sh) sets everything up; you don't need to edit this.
+#
+#   bot    the bot itself (Telegram + dashboard + alert loops)
+#   caddy  web server in front of the dashboard: gives you HTTPS automatically
+
+services:
+  bot:
+    build: .
+    restart: always                 # starts again after crashes and server reboots
+    env_file: .env                  # your secrets (created by install.sh)
+    environment:
+      DATA_DIR: /data
+      PORT: "8080"
+      PUBLIC_URL: "https://${DOMAIN}"
+    volumes:
+      - zenobot_data:/data          # the database survives updates and reboots
+    expose:
+      - "8080"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  caddy:
+    image: caddy:2
+    restart: always
+    depends_on: [bot]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data            # stores the HTTPS certificate
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  zenobot_data:
+  caddy_data:
+  caddy_config:

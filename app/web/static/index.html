@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zenobot_alerts · dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+<style>
+  /* ------------------------------------------------------------------
+     zenobot_alerts dashboard — one self-contained page.
+     It polls the server every 3 seconds; any change made in Telegram
+     shows up here automatically (and vice-versa).
+     ------------------------------------------------------------------ */
+  :root{
+    --bg:#0b0e14; --panel:#121722; --panel2:#171d2b; --line:#232b3d;
+    --text:#e6e9f0; --muted:#8a93a8; --accent:#7c5cff; --accent2:#22d3a6;
+    --warn:#f5a524; --bad:#f2545b; --good:#22c55e; --radius:12px;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 10% -10%,#1b1640 0,transparent 60%),var(--bg);
+       color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-height:100vh}
+  header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;
+         padding:18px 24px;border-bottom:1px solid var(--line);position:sticky;top:0;
+         background:rgba(11,14,20,.85);backdrop-filter:blur(8px);z-index:5}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;letter-spacing:.2px}
+  .logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+        display:grid;place-items:center;font-size:16px}
+  .pills{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;
+        background:var(--panel);border:1px solid var(--line);font-size:12px;color:var(--muted)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+  .dot.ok{background:var(--good);box-shadow:0 0 8px var(--good)} .dot.bad{background:var(--bad)}
+  main{max-width:1180px;margin:0 auto;padding:20px 24px 60px}
+  .banner{background:#2a1f08;border:1px solid #5a4210;color:#ffd38a;padding:10px 14px;border-radius:10px;margin-bottom:16px}
+  nav.tabs{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap}
+  nav.tabs button{background:transparent;border:1px solid var(--line);color:var(--muted);padding:9px 16px;
+       border-radius:10px;cursor:pointer;font-weight:600}
+  nav.tabs button.on{background:var(--panel2);color:var(--text);border-color:var(--accent)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:16px}
+  .card h2{margin:0 0 4px;font-size:16px} .sub{color:var(--muted);font-size:13px;margin:0 0 14px}
+  .row{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+  label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600}
+  input,select,textarea{background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:9px;
+       padding:9px 10px;font:inherit;width:100%}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+  textarea{font-family:var(--mono);font-size:12px;min-height:130px;resize:vertical}
+  .seg{display:inline-flex;align-self:flex-start;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+  .seg button{background:var(--bg);border:0;color:var(--muted);padding:8px 12px;cursor:pointer;font-weight:600}
+  .seg button.on{background:var(--accent);color:#fff}
+  .btn{background:var(--accent);color:#fff;border:0;border-radius:9px;padding:9px 16px;font-weight:700;cursor:pointer}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
+  .btn.small{padding:5px 10px;font-size:12px} .btn.danger{background:transparent;border:1px solid #5b2226;color:#ff9aa0}
+  .btn:disabled{opacity:.5;cursor:default}
+  .switch{position:relative;width:46px;height:26px;display:inline-block}
+  .switch input{display:none}
+  .switch span{position:absolute;inset:0;background:#2a3247;border-radius:999px;transition:.2s;cursor:pointer}
+  .switch span:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+  .switch input:checked+span{background:var(--good)} .switch input:checked+span:before{transform:translateX(20px)}
+  .sw{display:flex;align-items:center;gap:10px;font-weight:700}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--muted);font-weight:600;font-size:12px;padding:8px;border-bottom:1px solid var(--line)}
+  td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  td.actions{white-space:nowrap;text-align:right} td.actions .btn{margin-left:4px}
+  .tok b{font-size:14px} .ca{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
+  .b-active{background:#12351f;color:#6ee7a0} .b-paused{background:#2b2a14;color:#f3d36b}
+  .b-expired{background:#222838;color:#9aa4bb}
+  .err{color:var(--warn);font-size:12px} .muted{color:var(--muted)} .num{font-family:var(--mono)}
+  .msg{min-height:20px;font-size:13px;margin-top:10px} .msg.ok{color:var(--good)} .msg.bad{color:var(--bad)}
+  .events li{padding:8px 0;border-bottom:1px solid var(--line);list-style:none}
+  .events{padding:0;margin:0}
+  .mod{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-start;justify-content:center;
+       padding:60px 16px;z-index:20;overflow:auto}
+  .mod.open{display:flex} .mod .card{width:min(760px,100%)}
+  .hint{font-size:12px;color:var(--muted)} .sep{height:1px;background:var(--line);margin:14px 0}
+  .ind{border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:10px}
+  .ind h3{margin:0 0 10px;font-size:14px;display:flex;gap:10px;align-items:center}
+  @media (max-width:700px){ td.actions{white-space:normal} th:nth-child(4),td:nth-child(4){display:none} }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="logo">⚡</div>zenobot_alerts</div>
+  <div class="pills">
+    <span class="pill" id="sync"><span class="dot"></span>connecting…</span>
+    <span class="pill" id="h-jupiter"><span class="dot"></span>Jupiter</span>
+    <span class="pill" id="h-gecko"><span class="dot"></span>GeckoTerminal</span>
+    <span class="pill" id="h-meteora"><span class="dot"></span>Meteora</span>
+  </div>
+</header>
+
+<main>
+  <div id="banners"></div>
+  <nav class="tabs">
+    <button data-tab="scanner" class="on">📡 Volume Scanner</button>
+    <button data-tab="token">🎯 Token Alerts</button>
+    <button data-tab="exit">🚪 Exit Alerts</button>
+    <button data-tab="activity">🧾 Activity</button>
+  </nav>
+
+  <!-- ===================== MODULE A ===================== -->
+  <section id="tab-scanner">
+    <div class="card">
+      <div class="row">
+        <div><h2>Global Volume Scanner</h2>
+          <p class="sub">Scans trending &amp; new Solana tokens every minute (Jupiter + GeckoTerminal).</p></div>
+        <label class="sw"><span id="sc-state">OFF</span>
+          <span class="switch"><input type="checkbox" id="sc-enabled"><span></span></span></label>
+      </div>
+      <form id="sc-form" autocomplete="off">
+        <label class="f" style="margin-bottom:12px">Timeframe
+          <span class="seg" id="sc-tf"></span></label>
+        <div class="grid">
+          <label class="f">Min volume (USD, selected timeframe)<input name="min_volume" placeholder="e.g. 50k"></label>
+          <label class="f">Min market cap (USD, 0 = none)<input name="min_mcap" placeholder="e.g. 100k"></label>
+          <label class="f">Max market cap (USD, 0 = none)<input name="max_mcap" placeholder="e.g. 50m"></label>
+          <label class="f">Min total fees (USD, 0 = off)<input name="min_fees" placeholder="e.g. 5k"></label>
+          <label class="f">Fees source
+            <select name="fees_source">
+              <option value="jupiter">Jupiter (fees paid by traders)</option>
+              <option value="meteora">Meteora DLMM (lifetime pool fees)</option>
+            </select></label>
+          <label class="f">Cooldown per token (minutes)<input name="cooldown_minutes" placeholder="60"></label>
+        </div>
+        <div class="row" style="margin-top:14px"><span class="msg" id="sc-msg"></span>
+          <button class="btn" type="submit">Save scanner settings</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Blacklist</h2>
+      <p class="sub">Contract addresses the scanner must ignore — one per line or comma-separated.</p>
+      <textarea id="bl-text" spellcheck="false"></textarea>
+      <div class="row" style="margin-top:10px"><span class="msg" id="bl-msg"></span>
+        <button class="btn" id="bl-save">Save blacklist</button></div>
+    </div>
+  </section>
+
+  <!-- ===================== MODULE B ===================== -->
+  <section id="tab-token" hidden>
+    <div class="card">
+      <div class="row">
+        <div><h2>Token-specific alerts</h2><p class="sub">Volume, price (USD/SOL) or market-cap alerts for tokens you choose. Each alert fires once per crossing, then re-arms.</p></div>
+        <label class="sw"><span id="tm-state">ON</span>
+          <span class="switch"><input type="checkbox" id="tm-enabled"><span></span></span></label>
+      </div>
+      <div id="ta-new"></div>
+    </div>
+    <div class="card"><h2>Active alerts</h2><div id="ta-list"></div></div>
+  </section>
+
+  <!-- ===================== MODULE C ===================== -->
+  <section id="tab-exit" hidden>
+    <div class="card">
+      <div class="row">
+        <div><h2>Exit position alerts (RSI / Bollinger)</h2><p class="sub">Computed on the live, still-open candle. Needs 2 consecutive confirmations to avoid false signals.</p></div>
+        <label class="sw"><span id="em-state">ON</span>
+          <span class="switch"><input type="checkbox" id="em-enabled"><span></span></span></label>
+      </div>
+      <div id="ea-new"></div>
+    </div>
+    <div class="card"><h2>Exit alerts</h2><div id="ea-list"></div></div>
+  </section>
+
+  <section id="tab-activity" hidden>
+    <div class="card"><h2>Recent alerts</h2><ul class="events" id="events"></ul></div>
+  </section>
+</main>
+
+<div class="mod" id="modal"><div class="card" id="modal-body"></div></div>
+
+<script>
+/* ======================= helpers ======================= */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const usd = x => { if (x == null) return "n/a"; const a = Math.abs(x), s = x < 0 ? "-" : "";
+  for (const [u,d] of [["B",1e9],["M",1e6],["K",1e3]]) if (a >= d) return `${s}$${(a/d).toFixed(2)}${u}`;
+  return `${s}$${a.toLocaleString(undefined,{maximumFractionDigits:2})}`; };
+const price = (x, cur="usd") => { if (x == null) return "n/a"; const p = Math.abs(x) >= 1 ? x.toLocaleString(undefined,{maximumFractionDigits:4})
+  : (Math.abs(x) >= 1e-4 ? Number(x.toPrecision(4)).toString() : x.toExponential(3));
+  return cur === "sol" ? `${p} SOL` : `$${p}`; };
+const pct = x => x == null ? "n/a" : `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`;
+const dur = s => { s = Math.max(0, Math.floor(s)); const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
+  return [d && d+"d", h && h+"h", (m || (!d && !h)) && m+"m"].filter(Boolean).join(" "); };
+const ago = ts => ts ? dur(Date.now()/1000 - ts) + " ago" : "never";
+const shortCa = ca => ca ? ca.slice(0,4) + "…" + ca.slice(-4) : "";
+
+async function api(method, url, body) {
+  const r = await fetch(url, {method, headers: {"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || j.detail || `HTTP ${r.status}`);
+  return j;
+}
+function flash(el, text, ok=true) { el.textContent = text; el.className = "msg " + (ok ? "ok" : "bad");
+  if (ok) setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 3500); }
+
+/* ======================= state & sync ======================= */
+let S = null, lastRev = -1, lastSync = 0;
+const dirty = {scanner:false, blacklist:false};   // don't overwrite what you're typing
+
+async function refresh(force=false) {
+  try {
+    const {rev} = await api("GET", "/api/rev");
+    lastSync = Date.now();
+    if (!force && rev === lastRev) return;
+    S = await api("GET", "/api/state"); lastRev = S.rev; render();
+  } catch (e) { $("#sync").innerHTML = `<span class="dot bad"></span>offline: ${esc(e.message)}`; }
+}
+setInterval(refresh, 3000);
+setInterval(() => { if (lastSync) $("#sync").innerHTML = `<span class="dot ok"></span>live · synced ${Math.round((Date.now()-lastSync)/1000)}s ago`; }, 1000);
+
+/* ======================= tabs ======================= */
+document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav.tabs button").forEach(x => x.classList.toggle("on", x === b));
+  for (const t of ["scanner","token","exit","activity"]) $("#tab-" + t).hidden = (t !== b.dataset.tab);
+});
+
+/* ======================= render ======================= */
+function render() {
+  // data-source health pills
+  for (const h of ["jupiter","gecko","meteora"]) {
+    const st = (S.health || {})[h] || {}, el = $("#h-" + h), dot = el.querySelector(".dot");
+    dot.className = "dot " + (st.healthy === true ? "ok" : st.healthy === false ? "bad" : "");
+    el.title = st.error ? "Last error: " + st.error : "OK";
+  }
+  $("#banners").innerHTML = S.volume_persistent ? "" :
+    `<div class="banner">⚠️ No persistent volume detected: settings will be lost on the next deploy. In Railway, attach a Volume mounted at <b>/data</b>.</div>`;
+
+  renderScanner(); renderTokenAlerts(); renderExitAlerts();
+  $("#events").innerHTML = (S.events || []).map(e =>
+    `<li><span class="badge b-active">${esc(e.module)}</span> ${esc(e.text)} <span class="muted"> · ${ago(e.ts)}</span></li>`
+  ).join("") || `<li class="muted">No alerts sent yet.</li>`;
+}
+
+/* ---------- Module A ---------- */
+const SC_TFS = ["1m","5m","1h","24h"]; let scTf = "5m";
+function renderScanner() {
+  const s = S.scanner;
+  $("#sc-enabled").checked = s.enabled; $("#sc-state").textContent = s.enabled ? "ON" : "OFF";
+  if (!dirty.scanner) {
+    scTf = s.timeframe;
+    const f = $("#sc-form");
+    for (const k of ["min_volume","min_mcap","max_mcap","min_fees","cooldown_minutes","fees_source"]) f.elements[k].value = s[k];
+  }
+  $("#sc-tf").innerHTML = SC_TFS.map(t => `<button type="button" class="${t===scTf?"on":""}" data-tf="${t}">${t}</button>`).join("");
+  $("#sc-tf").querySelectorAll("button").forEach(b => b.onclick = () => { scTf = b.dataset.tf; dirty.scanner = true; renderScanner(); });
+  if (!dirty.blacklist) $("#bl-text").value = (S.blacklist || []).join("\n");
+}
+$("#sc-form").addEventListener("input", () => dirty.scanner = true);
+$("#sc-form").onsubmit = async e => {
+  e.preventDefault(); const f = e.target, body = {timeframe: scTf};
+  for (const k of ["min_volume","min_mcap","max_mcap","min_fees","cooldown_minutes","fees_source"]) body[k] = f.elements[k].value;
+  try { await api("PUT", "/api/scanner", body); dirty.scanner = false; flash($("#sc-msg"), "Saved ✓"); refresh(true); }
+  catch (err) { flash($("#sc-msg"), err.message, false); }
+};
+$("#sc-enabled").onchange = async e => {
+  try { await api("PUT", "/api/scanner", {enabled: e.target.checked}); refresh(true); }
+  catch (err) { flash($("#sc-msg"), err.message, false); e.target.checked = !e.target.checked; }
+};
+$("#bl-text").addEventListener("input", () => dirty.blacklist = true);
+$("#bl-save").onclick = async () => {
+  try { const r = await api("PUT", "/api/blacklist", {text: $("#bl-text").value}); dirty.blacklist = false;
+    flash($("#bl-msg"), `Saved ${r.blacklist.length} address(es)` + (r.invalid.length ? ` · ignored ${r.invalid.length} invalid` : ""));
+    refresh(true); }
+  catch (err) { flash($("#bl-msg"), err.message, false); }
+};
+
+/* ---------- Module B ---------- */
+function tokenForm(a = {}) {
+  const metric = a.metric || "volume";
+  return `<form class="ta-form" autocomplete="off"><div class="grid">
+    <label class="f">Contract address (CA)<input name="ca" value="${esc(a.ca||"")}" placeholder="Token mint address"></label>
+    <label class="f">Metric<select name="metric">
+      ${[["volume","Volume"],["price","Price"],["mcap","Market cap"]].map(([v,l]) => `<option value="${v}" ${v===metric?"selected":""}>${l}</option>`).join("")}</select></label>
+    <label class="f tf-wrap">Volume timeframe<select name="timeframe">
+      ${["1m","5m","1h","24h"].map(t => `<option ${t===(a.timeframe||"5m")?"selected":""}>${t}</option>`).join("")}</select></label>
+    <label class="f cur-wrap">Price in<select name="currency">
+      ${[["usd","USD"],["sol","SOL"]].map(([v,l]) => `<option value="${v}" ${v===(a.currency||"usd")?"selected":""}>${l}</option>`).join("")}</select></label>
+    <label class="f">Trigger when value is<select name="direction">
+      <option value="above" ${a.direction!=="below"?"selected":""}>Above or equal ⬆️</option>
+      <option value="below" ${a.direction==="below"?"selected":""}>Below or equal ⬇️</option></select></label>
+    <label class="f">Threshold<input name="threshold" value="${a.threshold ?? ""}" placeholder="e.g. 250k or 0.00042"></label>
+  </div><div class="row" style="margin-top:12px"><span class="msg"></span>
+    <button class="btn" type="submit">${a.id ? "Save changes" : "➕ Add alert"}</button></div></form>`;
+}
+function wireTokenForm(root, a) {
+  const f = root.querySelector("form"), sync = () => {
+    f.querySelector(".tf-wrap").style.display = f.elements.metric.value === "volume" ? "" : "none";
+    f.querySelector(".cur-wrap").style.display = f.elements.metric.value === "price" ? "" : "none"; };
+  f.elements.metric.onchange = sync; sync();
+  f.onsubmit = async e => {
+    e.preventDefault(); const body = Object.fromEntries(new FormData(f)); const msg = f.querySelector(".msg");
+    try { if (a && a.id) { await api("PUT", `/api/token-alerts/${a.id}`, body); closeModal(); }
+          else { await api("POST", "/api/token-alerts", body); f.reset(); sync(); flash(msg, "Alert added ✓"); }
+          refresh(true); }
+    catch (err) { flash(msg, err.message, false); }
+  };
+}
+let taNewBuilt = false;
+function renderTokenAlerts() {
+  const m = S.modules; $("#tm-enabled").checked = m.token_alerts_enabled; $("#tm-state").textContent = m.token_alerts_enabled ? "ON" : "OFF";
+  if (!taNewBuilt) { $("#ta-new").innerHTML = tokenForm(); wireTokenForm($("#ta-new")); taNewBuilt = true; }
+  const rows = S.token_alerts.map(a => {
+    const cond = (a.metric === "volume" ? `Volume ${a.timeframe}` : a.metric === "price" ? `Price (${(a.currency||"usd").toUpperCase()})` : "Market cap")
+      + ` ${a.direction === "above" ? "≥" : "≤"} ` + (a.metric === "price" ? price(a.threshold, a.currency) : usd(a.threshold));
+    const now = a.last_value == null ? "—" : (a.metric === "price" ? price(a.last_value, a.currency) : usd(a.last_value));
+    return `<tr><td class="tok"><b>$${esc(a.symbol || shortCa(a.ca))}</b> <span class="muted">${esc(a.name||"")}</span><div class="ca">${esc(a.ca)}</div></td>
+      <td>${cond}${a.armed ? "" : `<div class="hint">fired · re-arms when condition clears</div>`}</td>
+      <td class="num">${now}${a.last_error ? `<div class="err">${esc(a.last_error)}</div>` : ""}</td>
+      <td><span class="badge b-${a.status}">${a.status}</span><div class="hint">last hit: ${ago(a.last_triggered)}</div></td>
+      <td class="actions"><button class="btn ghost small" data-edit-t="${a.id}">Edit</button>
+        <button class="btn ghost small" data-st-t="${a.id}" data-to="${a.status==="active"?"paused":"active"}">${a.status==="active"?"Pause":"Resume"}</button>
+        <button class="btn danger small" data-del-t="${a.id}">Cancel</button></td></tr>`;
+  }).join("");
+  $("#ta-list").innerHTML = rows ? `<table><tr><th>Token</th><th>Condition</th><th>Now</th><th>Status</th><th></th></tr>${rows}</table>`
+                                 : `<p class="muted">No alerts yet — add one above.</p>`;
+  $("#ta-list").querySelectorAll("[data-edit-t]").forEach(b => b.onclick = () => {
+    const a = S.token_alerts.find(x => x.id == b.dataset.editT);
+    openModal(`<h2>Edit alert #${a.id}</h2><p class="sub">$${esc(a.symbol||"")}</p>${tokenForm(a)}<button class="btn ghost" onclick="closeModal()">Close</button>`);
+    wireTokenForm($("#modal-body"), a); });
+  $("#ta-list").querySelectorAll("[data-st-t]").forEach(b => b.onclick = () => act(() => api("POST", `/api/token-alerts/${b.dataset.stT}/status`, {status: b.dataset.to})));
+  $("#ta-list").querySelectorAll("[data-del-t]").forEach(b => b.onclick = () => confirm("Cancel (delete) this alert?") && act(() => api("DELETE", `/api/token-alerts/${b.dataset.delT}`)));
+}
+$("#tm-enabled").onchange = e => act(() => api("PUT", "/api/modules", {token_alerts_enabled: e.target.checked}));
+
+/* ---------- Module C ---------- */
+function exitForm(a = {}) {
+  const d = Object.assign({timeframe:"5m", rsi_enabled:1, rsi_length:14, rsi_min:70, bb_enabled:0, bb_length:20, bb_std:2,
+    bb_mode:"upper", bb_min_pct:0, combine:"all", duration_hours:24}, a);
+  const dh = d.duration_hours % 24 === 0 ? (d.duration_hours/24) + "d" : d.duration_hours + "h";
+  return `<form class="ea-form" autocomplete="off"><div class="grid">
+    <label class="f">Contract address (CA)<input name="ca" value="${esc(d.ca||"")}" placeholder="Token mint address"></label>
+    <label class="f">Timeframe<select name="timeframe">${["1m","5m","15m","1h","4h"].map(t => `<option ${t===d.timeframe?"selected":""}>${t}</option>`).join("")}</select></label>
+    <label class="f">Duration (auto-off)<input name="duration_hours" value="${dh}" placeholder="12h, 3d, 90m"></label>
+    <label class="f">Logic when both are ON<select name="combine">
+      <option value="all" ${d.combine==="all"?"selected":""}>ALL must hit (fewer, stronger alerts)</option>
+      <option value="any" ${d.combine==="any"?"selected":""}>ANY can hit</option></select></label>
+  </div>
+  <div class="ind"><h3><label class="switch"><input type="checkbox" name="rsi_enabled" ${+d.rsi_enabled?"checked":""}><span></span></label> RSI</h3>
+    <div class="grid"><label class="f">Length<input name="rsi_length" value="${d.rsi_length}"></label>
+    <label class="f">Alert when RSI ≥<input name="rsi_min" value="${d.rsi_min}"></label></div></div>
+  <div class="ind"><h3><label class="switch"><input type="checkbox" name="bb_enabled" ${+d.bb_enabled?"checked":""}><span></span></label> Bollinger Bands</h3>
+    <div class="grid"><label class="f">Length<input name="bb_length" value="${d.bb_length}"></label>
+    <label class="f">Width (std dev)<input name="bb_std" value="${d.bb_std}"></label>
+    <label class="f">Min above Middle Band (%)<input name="bb_above_middle" value="${d.bb_mode==="middle"?d.bb_min_pct:""}" placeholder="fill this OR the next"></label>
+    <label class="f">Min above Upper Band (%)<input name="bb_above_upper" value="${d.bb_mode==="upper"?d.bb_min_pct:""}" placeholder="e.g. 0 or 2"></label></div>
+    <p class="hint">Fill only one of the two "Min above" boxes.</p></div>
+  <div class="row" style="margin-top:12px"><span class="msg"></span>
+    <button class="btn" type="submit">${a.id ? "Save changes" : "➕ Add exit alert"}</button></div></form>`;
+}
+function wireExitForm(root, a) {
+  const f = root.querySelector("form");
+  f.onsubmit = async e => {
+    e.preventDefault(); const msg = f.querySelector(".msg"); const body = Object.fromEntries(new FormData(f));
+    body.rsi_enabled = f.elements.rsi_enabled.checked; body.bb_enabled = f.elements.bb_enabled.checked;
+    if (!body.rsi_enabled && !body.bb_enabled) return flash(msg, "⚠️ Turn ON at least RSI or Bollinger Bands — the alert was not switched on.", false);
+    if (body.bb_above_middle !== "" && body.bb_above_upper !== "") return flash(msg, "Fill only ONE of the two 'Min above' boxes.", false);
+    if (body.bb_above_middle === "" && body.bb_above_upper === "") body.bb_above_upper = "0";
+    try { if (a && a.id) { await api("PUT", `/api/exit-alerts/${a.id}`, body); closeModal(); }
+          else { await api("POST", "/api/exit-alerts", body); f.reset(); flash(msg, "Exit alert added ✓"); }
+          refresh(true); }
+    catch (err) { flash(msg, err.message, false); }
+  };
+}
+let eaNewBuilt = false;
+function renderExitAlerts() {
+  const m = S.modules; $("#em-enabled").checked = m.exit_alerts_enabled; $("#em-state").textContent = m.exit_alerts_enabled ? "ON" : "OFF";
+  if (!eaNewBuilt) { $("#ea-new").innerHTML = exitForm(); wireExitForm($("#ea-new")); eaNewBuilt = true; }
+  const rows = S.exit_alerts.map(a => {
+    const parts = [];
+    if (+a.rsi_enabled) parts.push(`RSI(${a.rsi_length}) ≥ ${a.rsi_min}`);
+    if (+a.bb_enabled) parts.push(`BB(${a.bb_length}, ${a.bb_std}) ≥ ${a.bb_mode==="middle"?"Middle":"Upper"} +${a.bb_min_pct}%`);
+    const live = [a.last_rsi != null ? `RSI ${a.last_rsi.toFixed(1)}` : "", a.last_bb_pct != null ? `BB ${pct(a.last_bb_pct)}` : ""].filter(Boolean).join(" · ") || "—";
+    const ends = a.status === "active" && a.expires_at ? `ends in ${dur(a.expires_at - Date.now()/1000)}` : (a.status === "expired" ? "finished" : "");
+    return `<tr><td class="tok"><b>$${esc(a.symbol || shortCa(a.ca))}</b> <span class="muted">${esc(a.name||"")}</span><div class="ca">${esc(a.ca)}</div></td>
+      <td>${a.timeframe} · ${parts.join(a.combine === "all" ? " AND " : " OR ")}${a.armed ? "" : `<div class="hint">fired · re-arms when condition clears</div>`}</td>
+      <td class="num">${live}${a.last_price != null ? `<div class="hint">${price(a.last_price)}</div>` : ""}${a.last_error && a.status==="active" ? `<div class="err">${esc(a.last_error)}</div>` : ""}</td>
+      <td><span class="badge b-${a.status}">${a.status}</span><div class="hint">${ends}</div></td>
+      <td class="actions"><button class="btn ghost small" data-edit-e="${a.id}">Edit</button>
+        <button class="btn ghost small" data-st-e="${a.id}" data-to="${a.status==="active"?"paused":"active"}">${a.status==="active"?"Pause":(a.status==="expired"?"Restart":"Resume")}</button>
+        <button class="btn danger small" data-del-e="${a.id}">Cancel</button></td></tr>`;
+  }).join("");
+  $("#ea-list").innerHTML = rows ? `<table><tr><th>Token</th><th>Condition</th><th>Live values</th><th>Status</th><th></th></tr>${rows}</table>`
+                                 : `<p class="muted">No exit alerts yet — add one above.</p>`;
+  $("#ea-list").querySelectorAll("[data-edit-e]").forEach(b => b.onclick = () => {
+    const a = S.exit_alerts.find(x => x.id == b.dataset.editE);
+    openModal(`<h2>Edit exit alert #${a.id}</h2><p class="sub">$${esc(a.symbol||"")} · changing the duration restarts the countdown</p>${exitForm(a)}<button class="btn ghost" onclick="closeModal()">Close</button>`);
+    wireExitForm($("#modal-body"), a); });
+  $("#ea-list").querySelectorAll("[data-st-e]").forEach(b => b.onclick = () => act(() => api("POST", `/api/exit-alerts/${b.dataset.stE}/status`, {status: b.dataset.to})));
+  $("#ea-list").querySelectorAll("[data-del-e]").forEach(b => b.onclick = () => confirm("Cancel (delete) this exit alert?") && act(() => api("DELETE", `/api/exit-alerts/${b.dataset.delE}`)));
+}
+$("#em-enabled").onchange = e => act(() => api("PUT", "/api/modules", {exit_alerts_enabled: e.target.checked}));
+
+/* ---------- modal & actions ---------- */
+function openModal(html) { $("#modal-body").innerHTML = html; $("#modal").classList.add("open"); }
+function closeModal() { $("#modal").classList.remove("open"); }
+$("#modal").onclick = e => { if (e.target.id === "modal") closeModal(); };
+async function act(fn) { try { await fn(); } catch (e) { alert(e.message); } refresh(true); }
+
+refresh(true);
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-# Railway builds this automatically. You never need to run it yourself.
+# How the bot is packaged. install.sh (or Railway/Fly) builds it automatically.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
