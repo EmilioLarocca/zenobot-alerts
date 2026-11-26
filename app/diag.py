@@ -2,8 +2,8 @@
 diag.py — quick health check of your data sources (GMGN is only used for total fees).
 
 Run on the server with:   zenobot test
-It prints what GMGN returns so you can see that the key works and which
-fields (like total fees) are present. Nothing is changed.
+It checks every source the bot uses: total fees (Metlex, GMGN backup), Jupiter
+prices, Jupiter chart candles and the GeckoTerminal backup. Nothing is changed.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import sys
 import time
 
 from .config import load_config
-from .datasources import DataHub, SourceError
+from .datasources import METLEX_FEES_URL, DataHub, SourceError, _f, unwrap_gmgn
 
 SAMPLE_TOKEN = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"  # JUP, always trading
 
@@ -22,26 +22,34 @@ async def main() -> None:
     cfg = load_config(require_telegram=False)
     data = DataHub(cfg)
     print("GMGN key configured:", "yes" if cfg.gmgn_api_key else "NO")
+
+    # Total fees: Metlex first (what the scanner uses), GMGN as backup
+    try:
+        raw = await data._get("metlex", METLEX_FEES_URL, {"address": SAMPLE_TOKEN}, "system", wait=10)
+        inner = unwrap_gmgn(raw) if isinstance(raw, dict) else None
+        v = _f(inner.get("total_fee")) if isinstance(inner, dict) else None
+        if v is not None:
+            print(f"\n[Total fees · Metlex] OK — JUP total fees = {v:,.2f} SOL (the scanner uses this)")
+        else:
+            print("\n[Total fees · Metlex] answered without total_fee:", json.dumps(raw)[:200])
+    except SourceError as e:
+        print("\n[Total fees · Metlex] FAILED:", e, "-> the scanner uses GMGN instead")
     if data.has_gmgn:
-        print("(The running bot shares this key; waiting 5 s so the test doesn't trip GMGN's limit…)")
-        await asyncio.sleep(5)
-        try:
-            raw = await data._gmgn("/v1/market/rank", {"chain": "sol", "interval": "5m", "limit": 3,
-                                                       "order_by": "volume", "direction": "desc"}, "rank")
-            items = raw.get("rank") if isinstance(raw, dict) else raw
-            if items:
-                first = items[0]
-                print("\n[GMGN trending] OK —", len(items), "tokens. First:", first.get("symbol"))
-                fee_keys = [k for k in first if "fee" in k.lower()]
-                print("  fee fields returned:", {k: first[k] for k in fee_keys} or "none")
-                print("  all fields:", ", ".join(sorted(first.keys())))
-            else:
-                print("\n[GMGN trending] answered but returned no tokens:", json.dumps(raw)[:300])
-        except SourceError as e:
-            print("\n[GMGN trending] FAILED:", e)
-            print("  -> AUTH_IP_BLOCKED: add this server's IP (zenobot ip) to your GMGN key's whitelist.")
-            print("  -> 429: GMGN's per-second limit was hit; wait 5 minutes and run the test again.")
+        print("(The running bot shares the GMGN key; waiting 3 s so the test doesn't trip GMGN's limit…)")
         await asyncio.sleep(3)
+        try:
+            info = await data._gmgn("/v1/token/info", {"chain": "sol", "address": SAMPLE_TOKEN}, "token_info")
+            v = _f(info.get("total_fee")) if isinstance(info, dict) else None
+            if v is not None:
+                print(f"[Total fees · GMGN backup] OK — JUP total fees = {v:,.2f} SOL")
+            else:
+                print("[Total fees · GMGN backup] answered without total_fee:", json.dumps(info)[:200])
+        except SourceError as e:
+            print("[Total fees · GMGN backup] FAILED:", e)
+            print("  -> AUTH_IP_BLOCKED: add this server's IP (zenobot ip) to your GMGN key's whitelist.")
+            print("  -> 429: GMGN's per-second limit was hit; wait a minute and run the test again.")
+    else:
+        print("[Total fees · GMGN backup] skipped — no GMGN key (Metlex alone is used)")
     try:
         p = await data.prices_usd([SAMPLE_TOKEN], "system")
         print("\n[Jupiter price] OK — JUP =", p.get(SAMPLE_TOKEN))
