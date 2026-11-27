@@ -23,6 +23,7 @@ import logging
 import time
 
 import pandas as pd
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .. import formatting as fmt
 from ..context import Ctx
@@ -143,7 +144,9 @@ async def fire(ctx: Ctx, a: dict, res: dict, notes: list, now: float, fields: di
         pass
     text = fmt.exit_alert(a, res, tok, "; ".join(notes), pool, reminder=reminder)
     text += f"\n🔔 Reminder every {REMINDER_MINUTES} min while the condition holds."
-    if await ctx.notifier.send(text, photo=(tok or {}).get("icon")):
+    # "Cancel this alert" button right under the alert (handled in telegram_ui.py, asks to confirm)
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel this alert", callback_data=f"C:mx:{a['id']}")]])
+    if await ctx.notifier.send(text, photo=(tok or {}).get("icon"), buttons=cancel_kb):
         fields.update(armed=0, last_triggered=now)
         parts = []
         if res.get("rsi") is not None:

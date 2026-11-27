@@ -59,6 +59,8 @@ def create_app(db: Database, data: Any, cfg: Any, password: str) -> FastAPI:
             "rev": await db.rev(),
             "now": time.time(),
             "scanner": await db.scanner_settings(),
+            "scanner_default": await svc.scanner_default(db),
+            "exit_default": await svc.exit_default(db),
             "blacklist": await db.blacklist(),
             "modules": await db.module_settings(),
             "token_alerts": await db.list("token_alerts", ("active", "paused")),
@@ -73,6 +75,15 @@ def create_app(db: Database, data: Any, cfg: Any, password: str) -> FastAPI:
     @app.put("/api/scanner", dependencies=[Depends(auth)])
     async def put_scanner(body: dict = Body(...)) -> dict:
         return await svc.update_scanner(db, body)
+
+    @app.put("/api/scanner-default", dependencies=[Depends(auth)])
+    async def put_scanner_default(body: dict = Body(...)) -> dict:
+        """Save the form's values to the scanner AND as your default."""
+        return await svc.save_scanner_default(db, body)
+
+    @app.post("/api/scanner-default/restore", dependencies=[Depends(auth)])
+    async def restore_scanner_default() -> dict:
+        return await svc.restore_scanner_default(db)
 
     @app.put("/api/blacklist", dependencies=[Depends(auth)])
     async def put_blacklist(body: dict = Body(...)) -> dict:
@@ -103,6 +114,11 @@ def create_app(db: Database, data: Any, cfg: Any, password: str) -> FastAPI:
         return {"ok": True}
 
     # ------------------------------------------------------- exit alerts
+    @app.put("/api/exit-default", dependencies=[Depends(auth)])
+    async def put_exit_default(body: dict = Body(...)) -> dict:
+        """Save the form's indicator settings as the default for new exit alerts."""
+        return await svc.save_exit_default(db, body)
+
     @app.post("/api/exit-alerts", dependencies=[Depends(auth)])
     async def add_exit_alert(body: dict = Body(...)) -> dict:
         aid = await svc.create_exit_alert(db, data, body, status="active")

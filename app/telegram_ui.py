@@ -20,7 +20,11 @@ Callback data cheat-sheet (max 64 bytes each):
   B:ask:<id>:<field>           ask for a number
   B:st:<id>:<status>           activate / pause
   B:x:<id> / B:xx:<id>         cancel (confirm) / cancel (do it)
+  A:def / A:rdef               save scanner settings as default / restore default
   C …                          same pattern for exit alerts, plus C:t:<id>:<field> toggles
+  C:def:<id>                   save this exit alert's settings as the default for new ones
+  C:mx|mxx|mkeep:<id>          "Cancel this alert" button under a sent exit alert (ask / do it / keep)
+  noop                         button that does nothing (e.g. "✅ Alert cancelled")
 """
 from __future__ import annotations
 
@@ -113,7 +117,7 @@ async def render_scanner(db: Database) -> Screen:
     return text, InlineKeyboardMarkup(kb)
 
 
-async def render_scanner_cfg(db: Database) -> Screen:
+async def render_scanner_cfg(db: Database, note: str = "") -> Screen:
     s = await db.scanner_settings()
     text = f"⚙️ <b>Scanner settings</b>\n\n{scanner_summary(s)}\n\nTap what you want to change:"
     kb = [
@@ -124,8 +128,11 @@ async def render_scanner_cfg(db: Database) -> Screen:
         [b(f"Min total fees {fmt.number(s['min_fees_sol']) + ' SOL' if s['min_fees_sol'] else 'off'}",
            "A:ask:min_fees_sol")],
         [b(f"Cooldown {int(s['cooldown_minutes'])} min", "A:ask:cooldown_minutes")],
+        [b("⭐ Set as default", "A:def"), b("↩️ Restore default", "A:rdef")],
         [b("⬅️ Back", "A")],
     ]
+    if note:
+        text += f"\n\n{note}"
     return text, InlineKeyboardMarkup(kb)
 
 
@@ -204,8 +211,12 @@ def exit_summary(a: dict) -> str:
     return (" AND " if a["combine"] == "all" else " OR ").join(parts) or "no indicator ON"
 
 
-def exit_line(a: dict) -> str:
-    sym = fmt.esc(a.get("symbol") or fmt.short_ca(a["ca"]))
+def exit_label(a: dict) -> str:
+    return "$" + (a.get("symbol") or fmt.short_ca(a["ca"]))[:14]
+
+
+def exit_line(a: dict, label: str) -> str:
+    """One line per alert: ticker + condition + live values (no numbers, order doesn't matter)."""
     ends = ""
     if a["status"] == "active" and a.get("expires_at"):
         ends = f" · ends in {fmt.duration(a['expires_at'] - time.time())}"
@@ -216,17 +227,21 @@ def exit_line(a: dict) -> str:
         live += f" · RSI {a['last_rsi']:.1f}"
     if a.get("last_bb_pct") is not None:
         live += f" · BB {fmt.pct(a['last_bb_pct'])}"
-    return (f"{STATUS_ICON.get(a['status'], '')} #{a['id']} <b>${sym}</b> {a['timeframe']} — "
+    return (f"{STATUS_ICON.get(a['status'], '')} <b>{fmt.esc(label)}</b> {a['timeframe']} — "
             f"{exit_summary(a)}{ends}{live}")
 
 
 async def render_exit_list(db: Database) -> Screen:
     m = await db.module_settings()
     alerts = await db.list("exit_alerts")
-    lines = [exit_line(a) for a in alerts] or ["<i>No exit alerts yet. Tap ➕ New exit alert.</i>"]
+    labels = [exit_label(a) for a in alerts]
+    lines = [exit_line(a, lab) for a, lab in zip(alerts, labels)] or ["<i>No exit alerts yet. Tap ➕ New exit alert.</i>"]
     text = f"🚪 <b>Exit Alerts</b> — {ON if m['exit_alerts_enabled'] else OFF}\n\n" + "\n".join(lines)
-    kb = [[b(f"✏️ Edit #{a['id']} ${(a.get('symbol') or fmt.short_ca(a['ca']))[:12]}", f"C:e:{a['id']}"),
-           b("❌ Cancel", f"C:x:{a['id']}")] for a in alerts[:40]]
+    kb = []
+    for a, lab in zip(alerts[:40], labels):
+        if labels.count(lab) > 1:  # same token twice: tell the buttons apart by timeframe
+            lab += f" {a['timeframe']}"
+        kb.append([b(f"✏️ {lab}", f"C:e:{a['id']}"), b("❌ Cancel", f"C:x:{a['id']}")])
     kb.append([b("➕ New exit alert", "C:new")])
     kb.append([b("⚪ Module OFF" if m["exit_alerts_enabled"] else "🟢 Module ON", "C:mod"), b("⬅️ Back", "menu")])
     return text, InlineKeyboardMarkup(kb)
@@ -244,7 +259,7 @@ async def render_exit_card(db: Database, aid: int, note: str = "") -> Screen:
     if a.get("last_error") and a["status"] == "active":
         extra += f"⚠️ {fmt.esc(a['last_error'])}\n"
     text = (
-        f"🚪 <b>Exit alert #{a['id']}</b> — {status}\n"
+        f"🚪 <b>Exit alert {fmt.esc(exit_label(a))}</b> — {status}\n"
         f"{fmt.token_title(a.get('symbol'), a.get('name'))}\n<code>{a['ca']}</code>\n\n"
         f"Condition: <b>{exit_summary(a)}</b>\nTimeframe: <b>{a['timeframe']}</b> · "
         f"Duration: <b>{fmt.hours_label(a['duration_hours'])}</b>\n{extra}"
@@ -270,12 +285,13 @@ async def render_exit_card(db: Database, aid: int, note: str = "") -> Screen:
     else:
         kb.append([b({"draft": "▶️ Activate", "expired": "🔁 Restart"}.get(a["status"], "▶️ Resume"),
                      f"C:st:{i}:active")])
+    kb.append([b("⭐ Set as default for new exit alerts", f"C:def:{i}")])
     kb.append([b("❌ Cancel alert", f"C:x:{i}"), b("⬅️ Back", "C")])
     return text, InlineKeyboardMarkup(kb)
 
 
-def confirm_screen(kind: str, aid: int) -> Screen:
-    return (f"Cancel alert #{aid}? This deletes it.",
+def confirm_screen(kind: str, aid: int, label: str = "") -> Screen:
+    return (f"Cancel alert {fmt.esc(label) if label else f'#{aid}'}? This deletes it.",
             InlineKeyboardMarkup([[b("🗑 Yes, cancel it", f"{kind}:xx:{aid}"), b("No", f"{kind}:e:{aid}")]]))
 
 
@@ -367,6 +383,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int |
         return ConversationHandler.END
     context.user_data.pop("pending", None)  # pressing any button cancels a pending question
     parts = (q.data or "menu").split(":")
+    if parts[0] == "noop":
+        await q.answer()
+        return ConversationHandler.END
+    if parts[0] == "C" and len(parts) == 3 and parts[1] in ("mx", "mxx", "mkeep"):
+        await on_alert_message_button(q, db, parts[1], int(parts[2]))
+        return ConversationHandler.END
     try:
         screen = await route(parts, db, data, context)
         await q.answer()
@@ -377,9 +399,34 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int |
     return ConversationHandler.END
 
 
+async def on_alert_message_button(q: Any, db: Database, act: str, aid: int) -> None:
+    """
+    The "❌ Cancel this alert" button under a sent exit alert. Only the buttons of that
+    message change (the alert text stays): ask → "Yes, cancel" / "Keep it" → done.
+    """
+    a = await db.get("exit_alerts", aid)
+    if act == "mx" and a:
+        kb = [[b("🗑 Yes, cancel it", f"C:mxx:{aid}"), b("↩️ Keep it", f"C:mkeep:{aid}")]]
+        await q.answer()
+    elif act == "mkeep" and a:
+        kb = [[b("❌ Cancel this alert", f"C:mx:{aid}")]]
+        await q.answer("Kept ✓")
+    elif act == "mxx" and a:
+        await svc.delete_alert(db, "exit_alerts", aid)
+        kb = [[b(f"✅ {exit_label(a)} exit alert cancelled", "noop")]]
+        await q.answer("Exit alert cancelled")
+    else:
+        kb = [[b("This alert no longer exists", "noop")]]
+        await q.answer("Already cancelled")
+    try:
+        await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
+    except BadRequest as e:
+        log.info("could not update alert buttons: %s", e)
+
+
 async def route(p: list[str], db: Database, data: Any, context: ContextTypes.DEFAULT_TYPE) -> Screen:
     head = p[0]
-    if head == "menu" or head == "noop":
+    if head == "menu":
         return await render_main(db, context.application.bot_data.get("public_url"))
 
     # ---------------- Module A
@@ -393,6 +440,12 @@ async def route(p: list[str], db: Database, data: Any, context: ContextTypes.DEF
             return await render_scanner(db)
         if act == "cfg":
             return await render_scanner_cfg(db)
+        if act == "def":
+            await svc.save_scanner_default(db)
+            return await render_scanner_cfg(db, "⭐ Saved as your default.")
+        if act == "rdef":
+            await svc.restore_scanner_default(db)
+            return await render_scanner_cfg(db, "↩️ Default restored.")
         if act == "tf":
             await svc.update_scanner(db, {"timeframe": p[2]})
             return await render_scanner_cfg(db)
@@ -454,8 +507,15 @@ async def route(p: list[str], db: Database, data: Any, context: ContextTypes.DEF
         if act == "st":
             await svc.set_exit_alert_status(db, aid, p[3])
             return await render_exit_card(db, aid, "✅ Saved.")
+        if act == "def":
+            a = await db.get("exit_alerts", aid)
+            if not a:
+                raise svc.ValidationError("Alert not found")
+            await svc.save_exit_default(db, a)
+            return await render_exit_card(db, aid, "⭐ Saved as the default for new exit alerts.")
         if act == "x":
-            return confirm_screen("C", aid)
+            a = await db.get("exit_alerts", aid)
+            return confirm_screen("C", aid, exit_label(a) if a else "")
         if act == "xx":
             await svc.delete_alert(db, "exit_alerts", aid)
             return await render_exit_list(db)

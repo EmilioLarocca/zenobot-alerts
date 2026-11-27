@@ -57,9 +57,11 @@ def cfg(tmp: Path, gmgn: bool = False) -> Config:
 class FakeNotifier:
     def __init__(self):
         self.sent: list[tuple[str, str | None]] = []
+        self.buttons: list = []
 
-    async def send(self, text, photo=None):
+    async def send(self, text, photo=None, buttons=None):
         self.sent.append((text, photo))
+        self.buttons.append(buttons)
         return True
 
 
@@ -698,4 +700,121 @@ def test_exit_alert_fires_on_jupiter_candles(tmp_path):
         await exit_alerts.run_cycle(ctx)
         assert (await ctx.db.get("exit_alerts", aid))["status"] == "expired"
         assert "finished" in ctx.notifier.sent[-1][0]
+    run(go())
+
+
+def test_defaults_scanner_and_exit(tmp_path):
+    m = Market()
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m)
+        db = ctx.db
+        assert (await svc.scanner_default(db))["min_volume"] == 70_000        # built-in until you save one
+        await svc.update_scanner(db, {"enabled": True})
+        d = await svc.save_scanner_default(db, {"min_volume": "80k", "min_fees_sol": "25", "timeframe": "1h"})
+        assert d["min_volume"] == 80_000 and d["timeframe"] == "1h" and "enabled" not in d
+        await svc.update_scanner(db, {"min_volume": "200k", "timeframe": "5m"})   # experiment...
+        s = await svc.restore_scanner_default(db)                                # ...and go back
+        assert s["min_volume"] == 80_000 and s["min_fees_sol"] == 25 and s["timeframe"] == "1h"
+        assert s["enabled"] is True                                              # ON/OFF untouched
+
+        with pytest.raises(svc.ValidationError):                                 # no indicator ON
+            await svc.save_exit_default(db, {"rsi_enabled": False, "bb_enabled": False})
+        await svc.save_exit_default(db, {"ca": MINT_A, "timeframe": "15m", "rsi_min": "80", "bb_enabled": True,
+                                         "bb_above_middle": "1", "duration_hours": "6h"})
+        aid = await svc.create_exit_alert(db, ctx.data, {"ca": MINT_B}, status="draft")   # e.g. from Telegram
+        a = await db.get("exit_alerts", aid)
+        assert (a["timeframe"], a["rsi_min"], a["bb_enabled"], a["bb_mode"], a["bb_min_pct"], a["duration_hours"]) \
+            == ("15m", 80, 1, "middle", 1, 6)
+        aid = await svc.create_exit_alert(db, ctx.data, {"ca": MINT_C, "rsi_min": "65"}, status="draft")
+        assert (await db.get("exit_alerts", aid))["rsi_min"] == 65               # what you type still wins
+    run(go())
+
+
+def test_defaults_web_api(tmp_path):
+    from app.web.server import create_app
+    m = Market()
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m)
+        app = create_app(ctx.db, ctx.data, ctx.cfg, "pw")
+        auth = ("admin", "pw")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.put("/api/scanner-default", json={"timeframe": "5m", "min_volume": "90k", "min_mcap": "100k",
+                                                          "max_mcap": "0", "min_fees_sol": "20", "cooldown_minutes": "15"},
+                            auth=auth)
+            assert r.status_code == 200 and r.json()["min_volume"] == 90_000
+            await c.put("/api/scanner", json={"min_volume": "300k"}, auth=auth)
+            r = await c.post("/api/scanner-default/restore", auth=auth)
+            assert r.json()["min_volume"] == 90_000
+            r = await c.put("/api/exit-default", json={"timeframe": "1h", "rsi_enabled": True, "rsi_length": "14",
+                                                       "rsi_min": "75", "bb_enabled": False, "bb_above_upper": "0",
+                                                       "combine": "all", "duration_hours": "1d"}, auth=auth)
+            assert r.status_code == 200, r.text
+            st = (await c.get("/api/state", auth=auth)).json()
+            assert st["exit_default"]["rsi_min"] == 75 and st["exit_default"]["timeframe"] == "1h"
+            assert st["scanner_default"]["cooldown_minutes"] == 15
+            r = await c.put("/api/exit-default", json={"rsi_enabled": False, "bb_enabled": False}, auth=auth)
+            assert r.status_code == 400
+    run(go())
+
+
+def test_exit_alert_cancel_button_and_ticker_list(tmp_path):
+    from app import telegram_ui as ui
+    m = Market()
+    m.candles = rising_candles()
+    m.price[MINT_A] = m.candles[0][4] * 1.01
+
+    async def go():
+        ctx = await make_ctx(tmp_path, m)
+        db = ctx.db
+        aid = await svc.create_exit_alert(db, ctx.data, {"ca": MINT_A, "rsi_min": 50, "timeframe": "5m"})
+        await svc.create_exit_alert(db, ctx.data, {"ca": MINT_A, "rsi_min": 50, "timeframe": "1h"}, status="draft")
+        await exit_alerts.run_cycle(ctx)
+        assert len(ctx.notifier.sent) == 1
+        kb = ctx.notifier.buttons[0]
+        assert kb.inline_keyboard[0][0].callback_data == f"C:mx:{aid}"
+
+        # the Telegram exit list: conditions kept, no "#" numbers
+        text, lkb = await ui.render_exit_list(db)
+        assert "#" not in text and "RSI(14) ≥ 50" in text and "$7GC" in text
+        labels = [btn.text for row in lkb.inline_keyboard for btn in row if btn.callback_data.startswith("C:e:")]
+        assert labels == ["✏️ $7GC 5m", "✏️ $7GC 1h"]                  # same token twice -> timeframe added
+        assert any(btn.callback_data == f"C:x:{aid}" for row in lkb.inline_keyboard for btn in row)
+        card, ckb = await ui.render_exit_card(db, aid)
+        assert "#" not in card.split("\n")[0] and "$7GC" in card
+        assert any(btn.callback_data == f"C:def:{aid}" for row in ckb.inline_keyboard for btn in row)
+
+        # pressing the buttons under the alert message
+        app = ui.build_application(ctx.cfg, db, ctx.data, "https://x.test", "pw")
+        context = SimpleNamespace(application=app, user_data={})
+
+        def press(data):
+            q = SimpleNamespace(data=data, answer=AsyncMock(), edit_message_text=AsyncMock(),
+                                edit_message_reply_markup=AsyncMock())
+            return SimpleNamespace(effective_chat=SimpleNamespace(id=42), effective_user=SimpleNamespace(id=42),
+                                   callback_query=q)
+        u = press(f"C:mx:{aid}")
+        await ui.on_button(u, context)
+        new_kb = u.callback_query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+        assert [b.callback_data for b in new_kb.inline_keyboard[0]] == [f"C:mxx:{aid}", f"C:mkeep:{aid}"]
+        u.callback_query.edit_message_text.assert_not_awaited()          # the alert text stays as it was
+        u = press(f"C:mkeep:{aid}")
+        await ui.on_button(u, context)
+        assert await db.get("exit_alerts", aid)                          # kept
+        u = press(f"C:mxx:{aid}")
+        await ui.on_button(u, context)
+        assert await db.get("exit_alerts", aid) is None                  # cancelled
+        done = u.callback_query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+        assert "cancelled" in done.inline_keyboard[0][0].text and done.inline_keyboard[0][0].callback_data == "noop"
+        u = press("noop")
+        await ui.on_button(u, context)
+        u.callback_query.edit_message_text.assert_not_awaited()          # "noop" doesn't open the menu
+
+        # "Set as default" from an exit card in Telegram
+        other = (await db.list("exit_alerts"))[0]
+        await ui.route(["C", "def", str(other["id"])], db, ctx.data, context)
+        assert (await svc.exit_default(db))["timeframe"] == "1h"
+        await ui.route(["A", "def"], db, ctx.data, context)
+        await ui.route(["A", "rdef"], db, ctx.data, context)
     run(go())

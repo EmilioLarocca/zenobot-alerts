@@ -12,7 +12,7 @@ import re
 import time
 from typing import Any
 
-from .db import Database
+from .db import DEFAULT_SCANNER, Database
 
 log = logging.getLogger("zenobot.services")
 
@@ -130,8 +130,8 @@ def _choice(v: Any, options: tuple[str, ...], field: str) -> str:
 
 
 # ======================================================= Module A: scanner
-async def update_scanner(db: Database, changes: dict[str, Any]) -> dict[str, Any]:
-    cur = await db.scanner_settings()
+def _apply_scanner_changes(cur: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
+    """Validate `changes` on top of `cur` and return the new settings (nothing is saved)."""
     new = dict(cur)
     for k, v in changes.items():
         if k == "enabled":
@@ -153,11 +153,39 @@ async def update_scanner(db: Database, changes: dict[str, Any]) -> dict[str, Any
         raise ValidationError("Min market cap is higher than max market cap")
     new.pop("fees_source", None)
     new.pop("min_fees", None)
+    return new
+
+
+async def update_scanner(db: Database, changes: dict[str, Any]) -> dict[str, Any]:
+    cur = await db.scanner_settings()
+    new = _apply_scanner_changes(cur, changes)
     await db.set_json("scanner", new)
     if new["enabled"] != cur["enabled"]:
         _announce(f"{'🟢' if new['enabled'] else '⚪'} <b>Volume Scanner</b> turned "
                   f"{'ON' if new['enabled'] else 'OFF'}")
     return new
+
+
+# Your saved default for the scanner (everything except ON/OFF). "Restore default" goes back to it.
+SCANNER_DEFAULT_KEYS = ("timeframe", "min_volume", "min_mcap", "max_mcap", "min_fees_sol", "cooldown_minutes")
+
+
+async def scanner_default(db: Database) -> dict[str, Any]:
+    stored = await db.get_json("scanner_default", {}) or {}
+    return {k: stored.get(k, DEFAULT_SCANNER[k]) for k in SCANNER_DEFAULT_KEYS}
+
+
+async def save_scanner_default(db: Database, changes: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Apply `changes` (if any) to the scanner and save the result as your default."""
+    new = await update_scanner(db, {k: v for k, v in (changes or {}).items() if k != "enabled"})
+    default = {k: new[k] for k in SCANNER_DEFAULT_KEYS}
+    await db.set_json("scanner_default", default)
+    return default
+
+
+async def restore_scanner_default(db: Database) -> dict[str, Any]:
+    """Put your saved default back (the scanner stays ON/OFF as it is)."""
+    return await update_scanner(db, await scanner_default(db))
 
 
 async def set_blacklist(db: Database, text_or_list: str | list) -> tuple[list[str], list[str]]:
@@ -313,6 +341,26 @@ def normalize_exit_alert(data: dict[str, Any], base: dict[str, Any] | None = Non
     return out
 
 
+EXIT_DEFAULT_KEYS = tuple(EXIT_DEFAULTS)
+_ANY_MINT = "So11111111111111111111111111111111111111112"  # placeholder CA, only to validate defaults
+
+
+async def exit_default(db: Database) -> dict[str, Any]:
+    """Settings a NEW exit alert starts with (your saved default, else the built-in one)."""
+    stored = await db.get_json("exit_default", {}) or {}
+    return {k: stored.get(k, EXIT_DEFAULTS[k]) for k in EXIT_DEFAULT_KEYS}
+
+
+async def save_exit_default(db: Database, values: dict[str, Any]) -> dict[str, Any]:
+    """Validate the indicator settings and save them as the default for new exit alerts."""
+    vals = {k: v for k, v in values.items() if k != "ca"}
+    a = normalize_exit_alert({**vals, "ca": _ANY_MINT}, await exit_default(db))
+    check_exit_activatable(a)
+    default = {k: a[k] for k in EXIT_DEFAULT_KEYS}
+    await db.set_json("exit_default", default)
+    return default
+
+
 def check_exit_activatable(a: dict[str, Any]) -> None:
     if not int(a.get("rsi_enabled") or 0) and not int(a.get("bb_enabled") or 0):
         raise ValidationError(
@@ -321,7 +369,7 @@ def check_exit_activatable(a: dict[str, Any]) -> None:
 
 
 async def create_exit_alert(db: Database, data_hub: Any, data: dict[str, Any], status: str = "active") -> int:
-    a = normalize_exit_alert(data)
+    a = normalize_exit_alert(data, await exit_default(db))  # anything not given comes from your default
     if status == "active":
         check_exit_activatable(a)
         a["expires_at"] = time.time() + a["duration_hours"] * 3600

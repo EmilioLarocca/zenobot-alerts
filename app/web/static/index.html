@@ -78,6 +78,7 @@
   .ind{border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:10px}
   .ind h3{margin:0 0 10px;font-size:14px;display:flex;gap:10px;align-items:center}
   @media (max-width:700px){ td.actions{white-space:normal} th:nth-child(4),td:nth-child(4){display:none} }
+.btns{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 </style>
 </head>
 <body>
@@ -123,7 +124,11 @@
           <label class="f">Cooldown per token (minutes)<input name="cooldown_minutes" placeholder="60"></label>
         </div>
         <div class="row" style="margin-top:14px"><span class="msg" id="sc-msg"></span>
-          <button class="btn" type="submit">Save scanner settings</button></div>
+          <span class="btns">
+            <button class="btn ghost" type="button" id="sc-restore" title="Put your saved default back">↩ Restore default</button>
+            <button class="btn ghost" type="button" id="sc-default" title="Save these values and remember them as your default">⭐ Set as default</button>
+            <button class="btn" type="submit">Save scanner settings</button></span></div>
+        <p class="hint" id="sc-default-info"></p>
       </form>
     </div>
     <div class="card">
@@ -243,6 +248,9 @@ function renderScanner() {
   }
   $("#sc-tf").innerHTML = SC_TFS.map(t => `<button type="button" class="${t===scTf?"on":""}" data-tf="${t}">${t}</button>`).join("");
   $("#sc-tf").querySelectorAll("button").forEach(b => b.onclick = () => { scTf = b.dataset.tf; dirty.scanner = true; renderScanner(); });
+  const d = S.scanner_default || {};
+  $("#sc-default-info").textContent = `Your default: ${d.timeframe} · volume ≥ ${usd(d.min_volume)} · MC ${usd(d.min_mcap)}–${d.max_mcap ? usd(d.max_mcap) : "no max"}`
+    + ` · fees ${d.min_fees_sol ? "≥ " + d.min_fees_sol + " SOL" : "off"} · cooldown ${d.cooldown_minutes} min`;
   if (!dirty.blacklist) $("#bl-text").value = (S.blacklist || []).join("\n");
 }
 $("#sc-form").addEventListener("input", () => dirty.scanner = true);
@@ -250,6 +258,17 @@ $("#sc-form").onsubmit = async e => {
   e.preventDefault(); const f = e.target, body = {timeframe: scTf};
   for (const k of ["min_volume","min_mcap","max_mcap","min_fees_sol","cooldown_minutes"]) body[k] = f.elements[k].value;
   try { await api("PUT", "/api/scanner", body); dirty.scanner = false; flash($("#sc-msg"), "Saved ✓"); refresh(true); }
+  catch (err) { flash($("#sc-msg"), err.message, false); }
+};
+function scBody() { const f = $("#sc-form"), body = {timeframe: scTf};
+  for (const k of ["min_volume","min_mcap","max_mcap","min_fees_sol","cooldown_minutes"]) body[k] = f.elements[k].value;
+  return body; }
+$("#sc-default").onclick = async () => {
+  try { await api("PUT", "/api/scanner-default", scBody()); dirty.scanner = false; flash($("#sc-msg"), "Saved and set as default ⭐"); refresh(true); }
+  catch (err) { flash($("#sc-msg"), err.message, false); }
+};
+$("#sc-restore").onclick = async () => {
+  try { await api("POST", "/api/scanner-default/restore"); dirty.scanner = false; flash($("#sc-msg"), "Default restored ↩"); refresh(true); }
   catch (err) { flash($("#sc-msg"), err.message, false); }
 };
 $("#sc-enabled").onchange = async e => {
@@ -344,27 +363,44 @@ function exitForm(a = {}) {
     <label class="f">Min above Middle Band (%)<input name="bb_above_middle" value="${d.bb_mode==="middle"?d.bb_min_pct:""}" placeholder="fill this OR the next"></label>
     <label class="f">Min above Upper Band (%)<input name="bb_above_upper" value="${d.bb_mode==="upper"?d.bb_min_pct:""}" placeholder="e.g. 0 or 2"></label></div>
     <p class="hint">Fill only one of the two "Min above" boxes.</p></div>
-  <div class="row" style="margin-top:12px"><span class="msg"></span>
-    <button class="btn" type="submit">${a.id ? "Save changes" : "➕ Add exit alert"}</button></div></form>`;
+  <div class="row" style="margin-top:12px"><span class="msg"></span><span class="btns">
+    ${a.id ? "" : `<button class="btn ghost" type="button" data-set-default title="New exit alerts will start with these settings">⭐ Set as default</button>`}
+    <button class="btn" type="submit">${a.id ? "Save changes" : "➕ Add exit alert"}</button></span></div></form>`;
+}
+function exitBody(f, msg) {
+  const body = Object.fromEntries(new FormData(f));
+  body.rsi_enabled = f.elements.rsi_enabled.checked; body.bb_enabled = f.elements.bb_enabled.checked;
+  if (!body.rsi_enabled && !body.bb_enabled) { flash(msg, "⚠️ Turn ON at least RSI or Bollinger Bands.", false); return null; }
+  if (body.bb_above_middle !== "" && body.bb_above_upper !== "") { flash(msg, "Fill only ONE of the two 'Min above' boxes.", false); return null; }
+  if (body.bb_above_middle === "" && body.bb_above_upper === "") body.bb_above_upper = "0";
+  return body;
+}
+function rebuildNewExitForm(keepCa = "") {   // the "new alert" form always starts from your default
+  $("#ea-new").innerHTML = exitForm(S.exit_default || {}); wireExitForm($("#ea-new"));
+  $("#ea-new").querySelector("form").elements.ca.value = keepCa;
 }
 function wireExitForm(root, a) {
   const f = root.querySelector("form");
   f.onsubmit = async e => {
-    e.preventDefault(); const msg = f.querySelector(".msg"); const body = Object.fromEntries(new FormData(f));
-    body.rsi_enabled = f.elements.rsi_enabled.checked; body.bb_enabled = f.elements.bb_enabled.checked;
-    if (!body.rsi_enabled && !body.bb_enabled) return flash(msg, "⚠️ Turn ON at least RSI or Bollinger Bands — the alert was not switched on.", false);
-    if (body.bb_above_middle !== "" && body.bb_above_upper !== "") return flash(msg, "Fill only ONE of the two 'Min above' boxes.", false);
-    if (body.bb_above_middle === "" && body.bb_above_upper === "") body.bb_above_upper = "0";
-    try { if (a && a.id) { await api("PUT", `/api/exit-alerts/${a.id}`, body); closeModal(); }
-          else { await api("POST", "/api/exit-alerts", body); f.reset(); flash(msg, "Exit alert added ✓"); }
-          refresh(true); }
+    e.preventDefault(); const msg = f.querySelector(".msg"); const body = exitBody(f, msg);
+    if (!body) return;
+    try { if (a && a.id) { await api("PUT", `/api/exit-alerts/${a.id}`, body); closeModal(); refresh(true); }
+          else { await api("POST", "/api/exit-alerts", body); await refresh(true); rebuildNewExitForm();
+                 flash($("#ea-new .msg"), "Exit alert added ✓"); } }
+    catch (err) { flash(msg, err.message, false); }
+  };
+  const def = f.querySelector("[data-set-default]");
+  if (def) def.onclick = async () => {
+    const msg = f.querySelector(".msg"); const body = exitBody(f, msg);
+    if (!body) return;
+    try { await api("PUT", "/api/exit-default", body); flash(msg, "Saved as default for new exit alerts ⭐"); refresh(true); }
     catch (err) { flash(msg, err.message, false); }
   };
 }
 let eaNewBuilt = false;
 function renderExitAlerts() {
   const m = S.modules; $("#em-enabled").checked = m.exit_alerts_enabled; $("#em-state").textContent = m.exit_alerts_enabled ? "ON" : "OFF";
-  if (!eaNewBuilt) { $("#ea-new").innerHTML = exitForm(); wireExitForm($("#ea-new")); eaNewBuilt = true; }
+  if (!eaNewBuilt) { rebuildNewExitForm(); eaNewBuilt = true; }
   const rows = S.exit_alerts.map(a => {
     const parts = [];
     if (+a.rsi_enabled) parts.push(`RSI(${a.rsi_length}) ≥ ${a.rsi_min}`);
@@ -383,7 +419,7 @@ function renderExitAlerts() {
                                  : `<p class="muted">No exit alerts yet — add one above.</p>`;
   $("#ea-list").querySelectorAll("[data-edit-e]").forEach(b => b.onclick = () => {
     const a = S.exit_alerts.find(x => x.id == b.dataset.editE);
-    openModal(`<h2>Edit exit alert #${a.id}</h2><p class="sub">$${esc(a.symbol||"")} · changing the duration restarts the countdown</p>${exitForm(a)}<button class="btn ghost" onclick="closeModal()">Close</button>`);
+    openModal(`<h2>Edit exit alert $${esc(a.symbol || shortCa(a.ca))}</h2><p class="sub">Changing the duration restarts the countdown</p>${exitForm(a)}<button class="btn ghost" onclick="closeModal()">Close</button>`);
     wireExitForm($("#modal-body"), a); });
   $("#ea-list").querySelectorAll("[data-st-e]").forEach(b => b.onclick = () => act(() => api("POST", `/api/exit-alerts/${b.dataset.stE}/status`, {status: b.dataset.to})));
   $("#ea-list").querySelectorAll("[data-del-e]").forEach(b => b.onclick = () => confirm("Cancel (delete) this exit alert?") && act(() => api("DELETE", `/api/exit-alerts/${b.dataset.delE}`)));
