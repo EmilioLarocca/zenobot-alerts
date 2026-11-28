@@ -774,6 +774,7 @@ def test_exit_alert_cancel_button_and_ticker_list(tmp_path):
         assert len(ctx.notifier.sent) == 1
         kb = ctx.notifier.buttons[0]
         assert kb.inline_keyboard[0][0].callback_data == f"C:mx:{aid}"
+        assert (kb.inline_keyboard[1][0].text, kb.inline_keyboard[1][0].callback_data) == ("🚪 Exit Alerts", "C:ml")
 
         # the Telegram exit list: conditions kept, no "#" numbers
         text, lkb = await ui.render_exit_list(db)
@@ -792,12 +793,13 @@ def test_exit_alert_cancel_button_and_ticker_list(tmp_path):
         def press(data):
             q = SimpleNamespace(data=data, answer=AsyncMock(), edit_message_text=AsyncMock(),
                                 edit_message_reply_markup=AsyncMock())
-            return SimpleNamespace(effective_chat=SimpleNamespace(id=42), effective_user=SimpleNamespace(id=42),
-                                   callback_query=q)
+            return SimpleNamespace(effective_chat=SimpleNamespace(id=42, send_message=AsyncMock()),
+                                   effective_user=SimpleNamespace(id=42), callback_query=q)
         u = press(f"C:mx:{aid}")
         await ui.on_button(u, context)
         new_kb = u.callback_query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
         assert [b.callback_data for b in new_kb.inline_keyboard[0]] == [f"C:mxx:{aid}", f"C:mkeep:{aid}"]
+        assert new_kb.inline_keyboard[-1][0].callback_data == "C:ml"
         u.callback_query.edit_message_text.assert_not_awaited()          # the alert text stays as it was
         u = press(f"C:mkeep:{aid}")
         await ui.on_button(u, context)
@@ -807,6 +809,12 @@ def test_exit_alert_cancel_button_and_ticker_list(tmp_path):
         assert await db.get("exit_alerts", aid) is None                  # cancelled
         done = u.callback_query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
         assert "cancelled" in done.inline_keyboard[0][0].text and done.inline_keyboard[0][0].callback_data == "noop"
+        assert done.inline_keyboard[-1][0].callback_data == "C:ml"
+        u = press("C:ml")                                                # open the list as a NEW message
+        await ui.on_button(u, context)
+        u.callback_query.edit_message_text.assert_not_awaited()
+        sent_text = u.effective_chat.send_message.await_args.args[0]
+        assert "Exit Alerts" in sent_text and "$7GC" in sent_text
         u = press("noop")
         await ui.on_button(u, context)
         u.callback_query.edit_message_text.assert_not_awaited()          # "noop" doesn't open the menu

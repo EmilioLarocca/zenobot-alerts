@@ -24,6 +24,7 @@ Callback data cheat-sheet (max 64 bytes each):
   C …                          same pattern for exit alerts, plus C:t:<id>:<field> toggles
   C:def:<id>                   save this exit alert's settings as the default for new ones
   C:mx|mxx|mkeep:<id>          "Cancel this alert" button under a sent exit alert (ask / do it / keep)
+  C:ml                         "Exit Alerts" button under a sent exit alert: opens the list in a new message
   noop                         button that does nothing (e.g. "✅ Alert cancelled")
 """
 from __future__ import annotations
@@ -386,6 +387,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int |
     if parts[0] == "noop":
         await q.answer()
         return ConversationHandler.END
+    if parts[:2] == ["C", "ml"]:  # from an alert message: open the list below it, keep the alert
+        await q.answer()
+        await show(update, await render_exit_list(db), new_message=True)
+        return ConversationHandler.END
     if parts[0] == "C" and len(parts) == 3 and parts[1] in ("mx", "mxx", "mkeep"):
         await on_alert_message_button(q, db, parts[1], int(parts[2]))
         return ConversationHandler.END
@@ -418,6 +423,7 @@ async def on_alert_message_button(q: Any, db: Database, act: str, aid: int) -> N
     else:
         kb = [[b("This alert no longer exists", "noop")]]
         await q.answer("Already cancelled")
+    kb.append([b("🚪 Exit Alerts", "C:ml")])  # always there, below the cancel button
     try:
         await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
     except BadRequest as e:

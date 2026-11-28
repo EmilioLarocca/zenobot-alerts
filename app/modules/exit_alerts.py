@@ -145,7 +145,9 @@ async def fire(ctx: Ctx, a: dict, res: dict, notes: list, now: float, fields: di
     text = fmt.exit_alert(a, res, tok, "; ".join(notes), pool, reminder=reminder)
     text += f"\n🔔 Reminder every {REMINDER_MINUTES} min while the condition holds."
     # "Cancel this alert" button right under the alert (handled in telegram_ui.py, asks to confirm)
-    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel this alert", callback_data=f"C:mx:{a['id']}")]])
+    # "Exit Alerts" opens the list in a NEW message, so this alert stays readable in the chat.
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel this alert", callback_data=f"C:mx:{a['id']}")],
+                                      [InlineKeyboardButton("🚪 Exit Alerts", callback_data="C:ml")]])
     if await ctx.notifier.send(text, photo=(tok or {}).get("icon"), buttons=cancel_kb):
         fields.update(armed=0, last_triggered=now)
         parts = []
